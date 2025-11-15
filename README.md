@@ -2,7 +2,7 @@
 A compact, single-button satellite surface built for Companion v4 using the M5 AtomS3. Features external RGB back LED, full-screen upscaled bitmap support, WiFi config portal, OTA updates, and automatic MAC-based device ID; perfect for enhancing events with on-stage triggers, info like countdown timers and tally.
 
 ## Features
-- Uses the M5 AtomS3 (ESP32-S3 / 0.85″ 128×128 screen) :contentReference[oaicite:2]{index=2}  
+- Uses the M5 AtomS3 (ESP32-S3 / 0.85″ 128×128 screen)
 - Full-screen bitmap rendering (Companion sends 72×72 which is up-scaled)  
 - External RGB LED on G8/G5/G6 with G7 ground – mirrors key colour  
 - WiFiManager config portal (hold the button for 5 s)  
