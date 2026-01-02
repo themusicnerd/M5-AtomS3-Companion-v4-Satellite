@@ -53,7 +53,7 @@ WiFiClient  client;
 WebServer restServer(9999);
 
 // Companion server
-char companion_host[40] = "Companion IP";
+char companion_host[40] = "";
 char companion_port[6]  = "16622";
 
 // Static IP (0.0.0.0 = DHCP)
@@ -67,18 +67,12 @@ String deviceID = "";
 // WiFi hostname for mDNS
 String wifiHostname = "";
 
-// Boot counter for config portal trigger
-const uint8_t BOOT_FAIL_LIMIT = 1;
-int bootCountCached = 0;
-
-// Config portal status flag
-bool configPortalActive = false;
-
-// Flag to show config portal message immediately after display initialization
-bool showConfigPortalMessage = false;
-
 // AP password for config portal (empty = open)
 const char* AP_password = "";
+
+// Boot-hold flags (force config portal and/or router mode on boot)
+bool forceConfigPortalOnBoot = false;
+bool forceRouterModeOnBoot  = false;
 
 // Timing
 unsigned long lastPingTime    = 0;
@@ -116,6 +110,13 @@ WiFiManagerParameter* custom_companionPort;
 WiFiManagerParameter* custom_displayMode;
 WiFiManagerParameter* custom_rotation = nullptr;   // rotation parameter
 int screenRotation = 0;  // 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° (TEXT mode only)
+
+// Boot menu constants
+#define MENU_BOOT_NORMAL 0
+#define MENU_BOOT_CONFIG 1
+#define MENU_BOOT_ROUTER 2
+#define MENU_DISPLAY_MODE 3
+#define MENU_TEXT_ROTATION 4
 
 // TEXT mode pressed-border flag (yellow outline when button pressed)
 bool textPressedBorder = false;
@@ -155,22 +156,6 @@ void saveParamCallback() {
 }
 
 // ------------------------------------------------------------
-// Boot counter management
-// ------------------------------------------------------------
-int eepromReadBootCounter() {
-  preferences.begin("companion", true);
-  int count = preferences.getInt("bootCounter", 0);
-  preferences.end();
-  return count;
-}
-
-void eepromWriteBootCounter(int count) {
-  preferences.begin("companion", false);
-  preferences.putInt("bootCounter", count);
-  preferences.end();
-}
-
-// ------------------------------------------------------------
 // Config portal functions
 // ------------------------------------------------------------
 void startConfigPortal() {
@@ -197,7 +182,6 @@ void startConfigPortal() {
 
   wifiManager.setAPCallback([](WiFiManager* wm) {
     Serial.println("[WiFi] Config portal started");
-    configPortalActive = true;
   });
 
   // Start AP + portal, blocks until user saves or exits
@@ -222,7 +206,6 @@ void startConfigPortal() {
   Serial.println("[WiFi] Config portal completed");
   Serial.printf("[WiFi] Companion Host: %s\n", companion_host);
   Serial.printf("[WiFi] Companion Port: %s\n", companion_port);
-  configPortalActive = false; // Reset flag when portal exits
 }
 
 // ------------------------------------------------------------
@@ -1257,6 +1240,21 @@ void connectToNetwork() {
 
   WiFi.mode(WIFI_STA);
 
+  // AP + full config portal
+  if (forceRouterModeOnBoot) {
+    Serial.println("[WiFi] Boot-hold: starting CONFIG portal (AP)");
+    String msg =
+      "WiFi CONFIG\n\n"
+      "SSID:\n" + deviceID +
+      "\n\n192.168.4.1";
+    drawCenterText(msg, WHITE, BLACK);
+
+    while (wifiManager.startConfigPortal(deviceID.c_str(), AP_password)) {}
+    ESP.restart();
+  }
+
+
+
   // Build default displayMode string
   char modeBuf[8];
   if (displayMode == DISPLAY_TEXT) {
@@ -1297,7 +1295,6 @@ void connectToNetwork() {
 
   wifiManager.setAPCallback([](WiFiManager* wm) {
     Serial.println("[WiFi] Config portal started");
-    configPortalActive = true;
   });
 
   // Normal autoConnect behaviour (connect to WiFi, or start portal if no WiFi)
@@ -1315,26 +1312,34 @@ void connectToNetwork() {
   Serial.printf("[WiFi] AutoConnect - SSID: %s\n", shortDeviceID.c_str());
 
   if (!res) {
-    Serial.println("[WiFi] Failed to connect, starting config portal...");
-    drawCenterText("WiFi ERR", RED, BLACK);
-    // WiFiManager will automatically start config portal on failure
-    // No need to restart - let WiFiManager handle it
+    Serial.println("[WiFi] Failed to connect, showing WiFi ERR");
+    drawCenterText("WiFi\nConnection\nFailed", RED, BLACK);
   } else {
     Serial.println("[WiFi] Connected to AP, IP=" + WiFi.localIP().toString());
-    drawCenterText("WiFi OK", GREEN, BLACK);
-    delay(500);
-    configPortalActive = false; // Reset flag when WiFi connects
-    
+
     // Verify and reset hostname after connection to ensure it persists
     String currentHostname = WiFi.getHostname();
     String expectedHostname = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
     if (currentHostname != expectedHostname) {
       Serial.printf("[WiFi] Hostname mismatch, resetting from '%s' to '%s'\n", currentHostname.c_str(), expectedHostname.c_str());
       WiFi.setHostname(expectedHostname.c_str());
-      delay(100);
-      Serial.printf("[WiFi] Hostname reset to: %s\n", WiFi.getHostname());
-    } else {
-      Serial.printf("[WiFi] Hostname confirmed: %s\n", currentHostname.c_str());
+    }
+
+    // Stay on current WiFi, open config portal
+    if (forceConfigPortalOnBoot) {
+      String msg =
+        "CONFIG PORTAL\n\n" +
+        WiFi.localIP().toString();
+      drawCenterText(msg, WHITE, BLACK);
+
+      wifiManager.startWebPortal();
+
+      // Stay here, serve the portal, wait for physical reset
+      while (true) {
+        ArduinoOTA.handle();
+        wifiManager.process();
+        delay(10);
+      }
     }
   }
 
@@ -1358,10 +1363,10 @@ void connectToNetwork() {
   }
 
   // Map rotation degrees -> M5 rotation index (0..3)
-  if (rotStr.toInt() == 90)  screenRotation = 1;
+  if (rotStr.toInt() == 90) screenRotation = 1;
   else if (rotStr.toInt() == 180) screenRotation = 2;
   else if (rotStr.toInt() == 270) screenRotation = 3;
-  else                    screenRotation = 0;
+  else screenRotation = 0;
 
   // Only apply rotation in TEXT mode; BITMAP stays at 0
   if (displayMode == DISPLAY_TEXT) {
@@ -1376,6 +1381,174 @@ void connectToNetwork() {
   Serial.println(rotDeg);
   Serial.print("[Config] Text rotation index: ");
   Serial.println(screenRotation);
+}
+
+// ------------------------------------------------------------
+// Boot Menu Functions
+// ------------------------------------------------------------
+
+// Save display settings to preferences
+void saveDisplaySettings() {
+  preferences.begin("companion", false);
+  preferences.putString("displayMode", displayMode == DISPLAY_TEXT ? "text" : "bitmap");
+  preferences.putString("rotation", String(screenRotation * 90));
+  preferences.end();
+}
+
+// Draw a single menu item (with highlight if selected)
+void drawMenuItem(String text, int y, bool selected) {
+  if (selected) {
+    // Highlight: inverse colors
+    M5.Display.setTextColor(BLACK, WHITE);
+    M5.Display.setCursor(8, y);
+    M5.Display.print("> " + text);
+    M5.Display.setTextColor(WHITE, BLACK);
+  } else {
+    M5.Display.setCursor(8, y);
+    M5.Display.print("  " + text);
+  }
+}
+
+// Draw the complete boot menu
+void drawBootMenu(int selectedIndex) {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setFont(&fonts::Font0);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+
+  // Header
+  M5.Display.setCursor(10, 5);
+  M5.Display.print("BOOT MENU");
+  M5.Display.drawLine(0, 15, 128, 15, WHITE);
+
+  // Menu items
+  int y = 25;
+  int lineHeight = 18;
+
+  // Boot modes
+  drawMenuItem("Boot: Normal", y, selectedIndex == 0);
+  drawMenuItem("Boot: Web Config", y + lineHeight, selectedIndex == 1);
+  drawMenuItem("Boot: WiFi AP", y + lineHeight * 2, selectedIndex == 2);
+
+  // Display mode
+  String dispVal = (displayMode == DISPLAY_TEXT) ? "TEXT" : "BITMAP";
+  drawMenuItem("Display: " + dispVal, y + lineHeight * 3, selectedIndex == 3);
+
+  // Rotation (text mode only)
+  if (displayMode == DISPLAY_TEXT) {
+    int degrees = screenRotation * 90;
+    drawMenuItem("Rotation: " + String(degrees) + "\xF8", y + lineHeight * 4, selectedIndex == 4);
+  }
+
+  // Footer hint
+  M5.Display.drawLine(0, 112, 128, 112, WHITE);
+  M5.Display.setCursor(5, 118);
+  M5.Display.setTextSize(1);
+  M5.Display.print("Click=Next Hold=OK");
+}
+
+// Handle menu item selection
+void handleMenuSelection(int item) {
+  switch (item) {
+    case MENU_BOOT_NORMAL:
+      // Do nothing, just boot normally
+      break;
+
+    case MENU_BOOT_CONFIG:
+      forceConfigPortalOnBoot = true;
+      break;
+
+    case MENU_BOOT_ROUTER:
+      forceRouterModeOnBoot = true;
+      break;
+
+    case MENU_DISPLAY_MODE:
+      // Cycle: BITMAP <-> TEXT
+      displayMode = (displayMode == DISPLAY_BITMAP) ? DISPLAY_TEXT : DISPLAY_BITMAP;
+      saveDisplaySettings();
+      // Don't exit menu, let user adjust more settings
+      return;
+
+    case MENU_TEXT_ROTATION:
+      // Cycle: 0 -> 90 -> 180 -> 270 -> 0
+      screenRotation = (screenRotation + 1) % 4;
+      saveDisplaySettings();
+      // Don't exit menu, let user adjust more settings
+      return;
+  }
+}
+
+// Main boot menu loop
+void runBootMenu() {
+  int currentMenuItem = 0;
+  int menuItemCount = 5;  // Will be 4 if BITMAP mode (rotation hidden)
+  unsigned long menuStartTime = millis();
+  bool waitButtonRelease = M5.BtnA.isPressed();  // If button is active right now, we will ignore the first release
+  bool exitMenu = false;
+  bool needsRedraw = true;
+  bool holdHandled = false;
+
+  while (!exitMenu) {
+    M5.update();
+
+    // Update item count based on current display mode
+    menuItemCount = (displayMode == DISPLAY_TEXT) ? 5 : 4;
+
+    // Wrap selection if needed (e.g., if we were on rotation and switched to bitmap)
+    if (currentMenuItem >= menuItemCount) {
+      currentMenuItem = menuItemCount - 1;
+      needsRedraw = true;
+    }
+
+    // Hold (2s): select current item
+    if (M5.BtnA.pressedFor(1000) && !holdHandled && !waitButtonRelease) {
+      handleMenuSelection(currentMenuItem);
+      holdHandled = true;
+      needsRedraw = true;
+
+      // If we selected a boot mode, show feedback and exit menu
+      if (currentMenuItem <= MENU_BOOT_ROUTER) {
+        M5.Display.fillScreen(BLACK);
+        if (currentMenuItem == MENU_BOOT_NORMAL) {
+          drawCenterText("Booting...", WHITE, BLACK);
+        } else if (currentMenuItem == MENU_BOOT_CONFIG) {
+          drawCenterText("Starting\nConfig Portal...", WHITE, BLACK);
+        } else if (currentMenuItem == MENU_BOOT_ROUTER) {
+          drawCenterText("Starting\nRouter Mode...", WHITE, BLACK);
+        }
+        exitMenu = true;
+      }
+    }
+
+    // Button released: navigate if it was a short click
+    if (M5.BtnA.wasReleased()) {
+      if (waitButtonRelease) {
+        waitButtonRelease = false;
+        continue;
+      }
+      if (!holdHandled) {
+        // Short click - navigate to next item
+        currentMenuItem = (currentMenuItem + 1) % menuItemCount;
+        needsRedraw = true;
+      }
+      holdHandled = false;  // Reset for next button press
+    }
+
+    // Redraw only when something changed
+    if (needsRedraw) {
+      drawBootMenu(currentMenuItem);
+      needsRedraw = false;
+    }
+
+    // Timeout (10s): auto-boot normal mode if button is still held (broken button detection)
+    if (waitButtonRelease && millis() - menuStartTime > 10000) {
+      currentMenuItem = MENU_BOOT_NORMAL;
+      drawCenterText("BUTTON ERROR\nDETECTED\n\nBooting...", WHITE, BLACK);
+      break;  // Force exit menu
+    }
+
+    delay(10);
+  }
 }
 
 // ------------------------------------------------------------
@@ -1401,61 +1574,6 @@ void setup() {
   deviceID.toUpperCase();
 
   Serial.println("[ID] deviceID = " + deviceID);
-
-  // Boot counter logic for config portal trigger - check immediately after deviceID creation
-  bootCountCached = eepromReadBootCounter();
-  Serial.printf("[Boot] Boot counter read: %u\n", bootCountCached);
-  
-  if (bootCountCached == 1) {
-    // Boot counter 1 → trigger config portal (user reset during boot animations)
-    Serial.println("[Boot] Boot counter 1 → triggering config portal");
-    eepromWriteBootCounter(0);  // Reset immediately
-    bootCountCached = 0;
-    
-    // Initialize display before showing config portal
-    auto cfg = M5.config();
-    M5.begin(cfg);
-    M5.Display.setFont(&fonts::Font0);
-    M5.Display.setTextSize(1);
-    applyDisplayBrightness();
-    clearScreen(BLACK);
-    
-    // Set flag before display check so it will show the message
-    showConfigPortalMessage = true;
-    Serial.println("[Boot] Setting showConfigPortalMessage flag to true");
-    
-    // Show config portal message if flag is set
-    if (showConfigPortalMessage) {
-      Serial.println("[Display] Showing config portal message - flag is set");
-      
-      // Add small delay to ensure display is fully initialized
-      delay(100);
-      
-      String msg =
-        "CONFIG PORTAL\n\n"
-        "Connect to WiFi:\n" +
-        String("m5atom-s3_") + deviceID.substring(deviceID.length() - 5) +
-        "\nThen go to:\n"
-        "192.168.4.1";
-      Serial.println("[Display] Message: " + msg);
-      drawCenterText(msg, WHITE, BLACK);
-      Serial.println("[Display] drawCenterText called");
-      
-      // Add another delay to ensure the display updates
-      delay(100);
-    } else {
-      Serial.println("[Display] Config portal message flag not set");
-    }
-    
-    startConfigPortal();
-    // startConfigPortal() will handle setup icons
-    return;  // Skip normal boot sequence
-  } else {
-    // Boot counter 0 (or any other value) → normal boot
-    Serial.println("[Boot] Boot counter 0 → normal boot");
-    // Set boot counter to 1 during boot animations so user can reset to trigger portal
-    eepromWriteBootCounter(1);
-  }
 
   // Load preferences
   preferences.begin("companion", false);
@@ -1513,15 +1631,10 @@ void setup() {
   applyDisplayBrightness();
   clearScreen(BLACK);
 
-  String bootMsg =
-    "BOOTING\n\n"
-    "M5AtomS3\n"
-    "Companion v4\n"
-    "Single Button\n"
-    "Satellite\n(" +
-    String(displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " MODE)";
+  if (M5.BtnA.isPressed())
+    runBootMenu();
 
-  drawCenterText(bootMsg, WHITE, BLACK);
+  drawCenterText("Booting...\n\n\nHold button\non boot\nfor MENU", WHITE, BLACK);
 
   // ---- External LED Setup ----
   pinMode(LED_PIN_GND, OUTPUT);
@@ -1546,12 +1659,9 @@ void setup() {
 
   setExternalLedColor(0,0,0);
 
-  // Quick LED colour test
-  Serial.println("[LED] Running power-on colour test (R/G/B)...");
-  setExternalLedColor(255, 0, 0);  delay(300);
-  setExternalLedColor(0, 255, 0);  delay(300);
-  setExternalLedColor(0, 0, 255);  delay(300);
-  setExternalLedColor(0,0,0);
+  // LED test
+  Serial.println("[LED] Running power-on test...");
+  setExternalLedColor(255, 255, 255);
 
   // WiFi connect (with icons)
   WiFi.setHostname(deviceID.c_str());
@@ -1601,19 +1711,15 @@ void setup() {
   }
 
   clearScreen(BLACK);
+  setExternalLedColor(0, 0, 0);
+
   String waitMsg =
-    "Waiting For\n"
-    "Companion\n"
-    "on\n" +
-    String(companion_host) + "\n" + String(companion_port) +
-    "\n(" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " MODE)";
+    "Ready\n\n" +
+    String(companion_host) + ":" + String(companion_port) +
+    "\n\n" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " mode";
 
   drawCenterText(waitMsg, WHITE, BLACK);
-  
-  // Successful boot completed - set boot counter to 0
-  eepromWriteBootCounter(0);
-  Serial.println("[Boot] Successful boot completed - boot counter reset to 0");
-  
+
   Serial.println("[System] Setup complete, entering main loop.");
 }
 
@@ -1624,28 +1730,6 @@ void loop() {
   M5.update();
   ArduinoOTA.handle();
   restServer.handleClient();
-
-  // Handle config portal display update
-  if (configPortalActive) {
-    static bool messageShown = false;
-    
-    if (!messageShown) {
-      // Config portal message
-      String msg =
-        "CONFIG PORTAL\n\n"
-        "Connect to WiFi:\n" +
-        String("m5atom-s3_") + deviceID.substring(deviceID.length() - 5) +
-        "\nThen go to:\n"
-        "192.168.4.1";
-
-      drawCenterText(msg, WHITE, BLACK);
-      messageShown = true;
-    }
-  } else {
-    // Reset flag when portal is not active
-    static bool messageShown = false;
-    messageShown = false;
-  }
 
   unsigned long now = millis();
 
@@ -1660,7 +1744,6 @@ void loop() {
     if (client.connect(companion_host, atoi(companion_port))) {
       Serial.println("[NET] Connected to Companion API");
       drawCenterText("Connected", GREEN, BLACK);
-      delay(200);
       sendAddDevice();
       lastPingTime = millis();
     } else {
