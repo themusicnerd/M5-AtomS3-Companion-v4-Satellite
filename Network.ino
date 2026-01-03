@@ -20,7 +20,7 @@ void sendAddDevice() {
     cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
           " PRODUCT_NAME=\"M5 AtomS3 (TEXT)\" "
           "KEYS_TOTAL=1 KEYS_PER_ROW=1 "
-          "COLORS=rgb TEXT=true BITMAPS=0";
+          "COLORS=rgb TEXT=true TEXT_STYLE=true BITMAPS=0";
   } else {
     cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
           " PRODUCT_NAME=\"M5 AtomS3 (BITMAP)\" "
@@ -37,6 +37,8 @@ void handleKeyState(const String& line) {
   update.hasColor = false;
   update.hasBgColor = false;
   update.hasFgColor = false;
+  update.hasFontSize = false;
+  update.fontSize = 0;
   update.bitmapBase64 = "";
   update.textContent = "";
 
@@ -94,7 +96,7 @@ void handleKeyState(const String& line) {
       update.bitmapBase64 = bmp;
     }
   } else {
-    // TEXT mode - parse colors and text
+    // TEXT mode - parse colors, font size, and text
     int r, g, b;
     if (parseColorToken(line, "COLOR", r, g, b)) {
       update.bgR = r;
@@ -108,6 +110,24 @@ void handleKeyState(const String& line) {
       update.fgG = g;
       update.fgB = b;
       update.hasFgColor = true;
+    }
+
+    // Parse FONT_SIZE if present
+    int fontPos = line.indexOf("FONT_SIZE=");
+    if (fontPos >= 0) {
+      int start = fontPos + 10;
+      int end = line.indexOf(' ', start);
+      if (end < 0) end = line.length();
+      String sizeStr = line.substring(start, end);
+      sizeStr.trim();
+
+      // Strip quotes if present
+      if (sizeStr.startsWith("\"") && sizeStr.endsWith("\""))
+        sizeStr = sizeStr.substring(1, sizeStr.length() - 1);
+
+      // Convert to int (0 for "auto" or invalid, otherwise numeric value)
+      update.fontSize = sizeStr.toInt();
+      update.hasFontSize = true;
     }
 
     // Extract TEXT= field

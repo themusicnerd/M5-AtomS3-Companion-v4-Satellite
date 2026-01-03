@@ -7,6 +7,15 @@
  */
 
 // ============================================================================
+// Function Prototypes
+// ============================================================================
+
+std::vector<String> splitIntoWords(const String& text);
+void wrapTextToLines(const String& text, int targetWidth, std::vector<String>& outLines);
+bool wrapToLines(const String& src, String& l1, String& l2, String& l3, int& outLines, int maxLines, int targetWidth = -1);
+bool tryFitSegments(const std::vector<String>& segments, int targetWidth, int screenHeight);
+
+// ============================================================================
 // Base64 Decoding
 // ============================================================================
 
@@ -218,13 +227,8 @@ void drawBitmapRGB888FullScreen(uint8_t* rgb, int size) {
 // ============================================================================
 
 void setExtraBigFont() {
-  M5.Display.setFont(&fonts::Font8);
-  M5.Display.setTextSize(1);
-}
-
-void setUltraFont() {
   M5.Display.setFont(&fonts::Font4);
-  M5.Display.setTextSize(2);
+  M5.Display.setTextSize(3);
 }
 
 void setLargeFont() {
@@ -237,11 +241,101 @@ void setNormalFont() {
   M5.Display.setTextSize(1);
 }
 
+
 // ============================================================================
 // Text Mode Display Helpers
 // ============================================================================
 
-bool wrapToLines(const String& src, String& l1, String& l2, String& l3, int& outLines) {
+std::vector<String> splitIntoWords(const String& text) {
+  std::vector<String> words;
+  int start = 0;
+  while (start < (int)text.length()) {
+    int space = text.indexOf(' ', start);
+    if (space < 0) space = text.length();
+    String word = text.substring(start, space);
+    if (word.length() > 0) words.push_back(word);
+    start = space + 1;
+  }
+  return words;
+}
+
+void wrapTextToLines(const String& text, int targetWidth, std::vector<String>& outLines) {
+  outLines.clear();
+
+  std::vector<String> words = splitIntoWords(text);
+  String currentLine = "";
+
+  for (size_t i = 0; i < words.size(); i++) {
+    String candidate = (currentLine.length() == 0) ? words[i] : currentLine + " " + words[i];
+    int candidateWidth = M5.Display.textWidth(candidate);
+
+    if (candidateWidth <= targetWidth) {
+      currentLine = candidate;
+    } else {
+      int wordWidth = M5.Display.textWidth(words[i]);
+
+      if (wordWidth > targetWidth) {
+        // Word too long - break character by character
+        if (currentLine.length() > 0) {
+          outLines.push_back(currentLine);
+          currentLine = "";
+        }
+
+        String word = words[i];
+        for (size_t charIdx = 0; charIdx < word.length(); charIdx++) {
+          String charCandidate = (currentLine.length() == 0) ? String(word[charIdx]) : currentLine + word[charIdx];
+          int charWidth = M5.Display.textWidth(charCandidate);
+
+          if (charWidth <= targetWidth) {
+            currentLine = charCandidate;
+          } else {
+            if (currentLine.length() > 0) {
+              outLines.push_back(currentLine);
+            }
+            currentLine = String(word[charIdx]);
+          }
+        }
+      } else {
+        // Word fits on its own line
+        if (currentLine.length() > 0) {
+          outLines.push_back(currentLine);
+        }
+        currentLine = words[i];
+      }
+    }
+  }
+
+  if (currentLine.length() > 0) {
+    outLines.push_back(currentLine);
+  }
+}
+
+void applyFixedFontSize(int ptSize) {
+  // Map Companion point sizes to M5GFX fonts
+  // Font4 = versatile, scales well with textSize
+  // Font8 has limited character support - avoid it
+  if (ptSize <= 7) {
+    M5.Display.setFont(&fonts::Font2);
+    M5.Display.setTextSize(1);
+  } else if (ptSize <= 14) {
+    M5.Display.setFont(&fonts::Font4);
+    M5.Display.setTextSize(1);
+  } else if (ptSize <= 18) {
+    M5.Display.setFont(&fonts::Font4);
+    M5.Display.setTextSize(1);
+  } else if (ptSize <= 24) {
+    M5.Display.setFont(&fonts::Font4);
+    M5.Display.setTextSize(2);
+  } else if (ptSize <= 36) {
+    M5.Display.setFont(&fonts::Font4);
+    M5.Display.setTextSize(3);
+  } else {
+    M5.Display.setFont(&fonts::Font4);
+    M5.Display.setTextSize(4);
+  }
+}
+
+bool wrapToLines(const String& src, String& l1, String& l2, String& l3, int& outLines, int maxLines, int targetWidth) {
   l1 = "";
   l2 = "";
   l3 = "";
@@ -251,141 +345,149 @@ bool wrapToLines(const String& src, String& l1, String& l2, String& l3, int& out
 
   M5.Display.setTextWrap(false);
 
-  int screenW = M5.Display.width();
+  int screenW = (targetWidth > 0) ? targetWidth : M5.Display.width();
 
-  // Split into words
-  std::vector<String> words;
-  int start = 0;
-  while (start < (int)src.length()) {
-    int space = src.indexOf(' ', start);
-    if (space < 0) space = src.length();
-    String w = src.substring(start, space);
-    if (w.length() > 0) words.push_back(w);
-    start = space + 1;
+  std::vector<String> lines;
+  wrapTextToLines(src, screenW, lines);
+
+  if ((int)lines.size() > maxLines) {
+    return false;
   }
 
-  String linesBuf[MAX_AUTO_LINES];
-  String* lines[MAX_AUTO_LINES];
-  for (int i = 0; i < MAX_AUTO_LINES; i++) {
-    linesBuf[i] = "";
-    lines[i] = &linesBuf[i];
+  outLines = lines.size();
+
+  if (outLines >= 1) l1 = lines[0];
+  if (outLines >= 2) l2 = lines[1];
+  if (outLines >= 3) l3 = lines[2];
+
+  autoWrappedLines.clear();
+  for (int i = 0; i < outLines && i < maxLines; i++) {
+    autoWrappedLines.push_back(lines[i]);
   }
-
-  int currentLine = 0;
-
-  for (size_t i = 0; i < words.size(); i++) {
-    if (currentLine >= MAX_AUTO_LINES) {
-      return false;
-    }
-
-    String candidate;
-    if (lines[currentLine]->length() == 0) {
-      candidate = words[i];
-    } else {
-      candidate = *lines[currentLine] + " " + words[i];
-    }
-
-    int w = M5.Display.textWidth(candidate);
-
-    if (w <= screenW) {
-      *lines[currentLine] = candidate;
-    } else {
-      currentLine++;
-      if (currentLine >= MAX_AUTO_LINES) {
-        return false;
-      }
-      *lines[currentLine] = words[i];
-    }
-  }
-
-  outLines = currentLine + 1;
-
-  if (outLines >= 1) l1 = linesBuf[0];
-  if (outLines >= 2) l2 = linesBuf[1];
-  if (outLines >= 3) l3 = linesBuf[2];
 
   return true;
 }
 
-void analyseLayout() {
+void analyseLayout(int fontSizeOverride) {
   line1 = "";
   line2 = "";
   line3 = "";
   numLines = 0;
   useManualLines = false;
+  useAutoWrappedLines = false;
   manualLines.clear();
+  autoWrappedLines.clear();
 
-  int len = currentText.length();
-  if (len == 0) return;
+  if (currentText.length() == 0) {
+    return;
+  }
 
-  // Manual \n lines
-  if (currentText.indexOf('\n') >= 0) {
-    setNormalFont();
-    M5.Display.setTextWrap(false);
+  M5.Display.setTextWrap(false);
 
+  int screenW = M5.Display.width();
+  int screenH = M5.Display.height();
+  int targetWidth = (int)(screenW * 0.9);
+
+  // Step 1: Split by \n if present
+  std::vector<String> segments;
+  bool hasManualNewlines = (currentText.indexOf('\n') >= 0);
+
+  if (hasManualNewlines) {
     int start = 0;
     while (true) {
       int idx = currentText.indexOf('\n', start);
       if (idx < 0) {
-        manualLines.push_back(currentText.substring(start));
+        segments.push_back(currentText.substring(start));
         break;
       }
-      manualLines.push_back(currentText.substring(start, idx));
+      segments.push_back(currentText.substring(start, idx));
       start = idx + 1;
     }
+  } else {
+    segments.push_back(currentText);
+  }
 
-    // Limit to 5 visible lines
-    if ((int)manualLines.size() > 5) {
-      manualLines.resize(5);
+  // Step 2: Determine font size
+  if (fontSizeOverride > 0) {
+    // Use Companion-specified font size
+    applyFixedFontSize(fontSizeOverride);
+  } else {
+    // Auto-size font to fit content
+    // Try fonts from largest to smallest
+    bool foundFit = false;
+
+    // Try ExtraBig (Font4 size 3)
+    setExtraBigFont();
+    if (tryFitSegments(segments, targetWidth, screenH)) {
+      foundFit = true;
     }
 
+    if (!foundFit) {
+      // Try Large (Font4 size 2)
+      setLargeFont();
+      if (tryFitSegments(segments, targetWidth, screenH)) {
+        foundFit = true;
+      }
+    }
+
+    if (!foundFit) {
+      // Fallback to Normal font
+      setNormalFont();
+    }
+  }
+
+  // Step 3: Wrap each segment if needed
+  manualLines.clear();
+  for (size_t i = 0; i < segments.size(); i++) {
+    String seg = segments[i];
+    int segWidth = M5.Display.textWidth(seg);
+
+    if (segWidth <= targetWidth) {
+      manualLines.push_back(seg);
+    } else {
+      std::vector<String> wrappedLines;
+      wrapTextToLines(seg, targetWidth, wrappedLines);
+      for (size_t j = 0; j < wrappedLines.size(); j++) {
+        manualLines.push_back(wrappedLines[j]);
+      }
+    }
+  }
+
+  // Limit to 5 visible lines
+  if ((int)manualLines.size() > 5) {
+    manualLines.resize(5);
+  }
+
+  // Step 4: Set rendering mode
+  if (hasManualNewlines || manualLines.size() > 1) {
     useManualLines = true;
-    return;
-  }
-
-  // Extra-big for ≤2 chars
-  if (len <= 2) {
-    setExtraBigFont();
+  } else if (manualLines.size() == 1) {
+    // Single line
     numLines = 1;
-    line1    = currentText;
-    return;
+    line1 = manualLines[0];
+  }
+}
+
+bool tryFitSegments(const std::vector<String>& segments, int targetWidth, int screenHeight) {
+  int totalLines = 0;
+
+  for (size_t i = 0; i < segments.size(); i++) {
+    String seg = segments[i];
+    int segWidth = M5.Display.textWidth(seg);
+
+    if (segWidth <= targetWidth) {
+      totalLines++;
+    } else {
+      std::vector<String> wrappedLines;
+      wrapTextToLines(seg, targetWidth, wrappedLines);
+      totalLines += wrappedLines.size();
+    }
   }
 
-  // Ultra for 3 chars
-  if (len == 3) {
-    setUltraFont();
-    numLines = 1;
-    line1    = currentText;
-    return;
-  }
+  int lineHeight = M5.Display.fontHeight();
+  int totalHeight = lineHeight * totalLines;
 
-  // Large for 4-6 chars
-  if (len <= 6) {
-    setLargeFont();
-    numLines = 1;
-    line1    = currentText;
-    return;
-  }
-
-  // Normal with auto-wrap
-  setNormalFont();
-  M5.Display.setTextWrap(false);
-
-  String w1, w2, w3;
-  int    lines = 0;
-  bool   fits  = wrapToLines(currentText, w1, w2, w3, lines);
-
-  if (fits && lines > 0 && lines <= MAX_AUTO_LINES) {
-    numLines  = lines;
-    line1     = w1;
-    line2     = (lines >= 2) ? w2 : "";
-    line3     = (lines >= 3) ? w3 : "";
-    return;
-  }
-
-  // Fallback: single line
-  numLines = 1;
-  line1    = currentText;
+  return (totalHeight <= screenHeight && totalLines <= 5);
 }
 
 void drawTextPressedBorderIfNeeded() {
@@ -405,6 +507,9 @@ void refreshTextDisplay() {
   M5.Display.setTextColor(txtColor, bgColor);
   M5.Display.setTextWrap(false);
 
+  // Clear any clipping to allow large text to render even if it exceeds margins
+  M5.Display.clearClipRect();
+
   if (currentText.length() == 0) {
     drawTextPressedBorderIfNeeded();
     return;
@@ -415,13 +520,19 @@ void refreshTextDisplay() {
 
   // Manual multi-line mode
   if (useManualLines) {
-    setNormalFont();
-    M5.Display.setTextDatum(middle_center);
+    Serial.printf("[RENDER] Manual multi-line mode: %d lines\n", manualLines.size());
+    M5.Display.setTextDatum(top_center);
 
     int lineHeight  = M5.Display.fontHeight();
     int lines       = manualLines.size();
     int totalHeight = lineHeight * lines;
-    int topY        = (screenH - totalHeight) / 2 + (lineHeight / 2);
+
+    // Calculate top Y position with baseline offset for better centering
+    int baseTopY = (screenH - totalHeight) / 2;
+    int topY = baseTopY + (lineHeight / 5);
+
+    Serial.printf("[RENDER] Manual: lineHeight=%d totalHeight=%d baseTopY=%d topY=%d\n",
+                  lineHeight, totalHeight, baseTopY, topY);
 
     for (int i = 0; i < lines; i++) {
       int y = topY + i * lineHeight;
@@ -432,46 +543,51 @@ void refreshTextDisplay() {
     return;
   }
 
-  M5.Display.setTextDatum(middle_center);
+  // Single-line rendering (numLines == 1)
+  if (numLines == 1) {
+    Serial.printf("[RENDER] Single-line mode: fontHeight=%d\n", M5.Display.fontHeight());
 
-  int len = currentText.length();
+    // For large fonts, shift down by 10-15% of font height to improve vertical centering
+    // This compensates for M5GFX baseline positioning behavior
+    int lineHeight = M5.Display.fontHeight();
+    int yOffset = lineHeight / 8;  // Shift down by 12.5% of font height
+    int centerY = (screenH / 2) + yOffset;
 
-  // Extra-big (≤2 chars)
-  if (len <= 2) {
-    setExtraBigFont();
-    M5.Display.drawString(currentText, screenW / 2, screenH / 2);
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
+    Serial.printf("[RENDER] Single: screenH=%d centerY=%d yOffset=%d\n", screenH, centerY, yOffset);
 
-  // Ultra (3 chars)
-  if (len == 3) {
-    setUltraFont();
-    M5.Display.drawString(currentText, screenW / 2, screenH / 2);
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
+    M5.Display.setTextDatum(middle_center);
+    M5.Display.drawString(line1, screenW / 2, centerY);
+  } else {
+    // Multi-line rendering (numLines > 1)
+    Serial.printf("[RENDER] Multi-line mode: %d lines, autoWrapped=%d\n",
+                  numLines, useAutoWrappedLines ? 1 : 0);
 
-  // Large (4-6 chars)
-  if (len <= 6) {
-    setLargeFont();
-    M5.Display.drawString(currentText, screenW / 2, screenH / 2);
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
-
-  // Multi-line centered
-  if (numLines >= 1 && numLines <= MAX_AUTO_LINES) {
-    setNormalFont();
-    String lines[3] = { line1, line2, line3 };
+    M5.Display.setTextDatum(top_center);
 
     int lineHeight  = M5.Display.fontHeight();
     int totalHeight = lineHeight * numLines;
-    int topY        = (screenH - totalHeight) / 2 + (lineHeight / 2);
 
-    for (int i = 0; i < numLines && i < 3; i++) {
-      int y = topY + i * lineHeight;
-      M5.Display.drawString(lines[i], screenW / 2, y);
+    // Calculate top Y position with baseline offset for better centering
+    // M5GFX fontHeight() includes ascent + descent, but top_center datum
+    // positions at the top of ascent. Subtract ~20% offset to shift text down.
+    int baseTopY = (screenH - totalHeight) / 2;
+    int topY = baseTopY + (lineHeight / 5);
+
+    Serial.printf("[RENDER] Multi: lineHeight=%d totalHeight=%d baseTopY=%d topY=%d\n",
+                  lineHeight, totalHeight, baseTopY, topY);
+
+    if (useAutoWrappedLines && autoWrappedLines.size() > 0) {
+      for (int i = 0; i < numLines && i < (int)autoWrappedLines.size(); i++) {
+        int y = topY + i * lineHeight;
+        M5.Display.drawString(autoWrappedLines[i], screenW / 2, y);
+      }
+    } else {
+      // Fallback to legacy 3-line array
+      String lines[3] = { line1, line2, line3 };
+      for (int i = 0; i < numLines && i < 3; i++) {
+        int y = topY + i * lineHeight;
+        M5.Display.drawString(lines[i], screenW / 2, y);
+      }
     }
   }
 
@@ -482,14 +598,14 @@ void refreshTextDisplay() {
 // Text Mode Update Functions
 // ============================================================================
 
-void setTextNow(const String& txt) {
+void setTextNow(const String& txt, int fontSizeOverride = 0) {
   currentText = txt;
-  analyseLayout();
+  analyseLayout(fontSizeOverride);
   refreshTextDisplay();
 }
 
-void setText(const String& txt) {
-  setTextNow(txt);
+void setText(const String& txt, int fontSizeOverride) {
+  setTextNow(txt, fontSizeOverride);
 }
 
 // ============================================================================

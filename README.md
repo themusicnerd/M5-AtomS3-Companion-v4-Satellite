@@ -87,6 +87,7 @@ v1.4 (Community)
 - Improved boot messages for better clarity
 - Faster boot time (reduced delays by ~2 seconds)
 - Removed runtime 5s long-press config portal (enables Companion delayed actions)
+- Improved text-mode rendering
 
 v1.3
 - Text-only mode with zero bitmap requests

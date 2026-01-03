@@ -49,9 +49,11 @@ struct PendingUpdate {
   int colorR, colorG, colorB;
   int bgR, bgG, bgB;
   int fgR, fgG, fgB;
+  int fontSize;  // 0 = auto, >0 = specific point size from Companion
   bool hasColor;
   bool hasBgColor;
   bool hasFgColor;
+  bool hasFontSize;
   bool hasData;  // true if update is pending
 };
 
@@ -98,7 +100,8 @@ void drawCenterText(const String& txt, uint16_t color = WHITE, uint16_t bg = BLA
 void applyDisplayBrightness();
 void drawBitmapRGB888FullScreen(uint8_t* rgb, int size);
 void refreshTextDisplay();
-void setText(const String& txt);
+void setText(const String& txt, int fontSizeOverride = 0);
+void analyseLayout(int fontSizeOverride = 0);
 void handleKeyStateTextField(const String& line);
 void handleTextModeColors(const String& line);
 
@@ -189,6 +192,9 @@ const int MAX_AUTO_LINES = 7;
 
 std::vector<String> manualLines;
 bool useManualLines = false;
+
+std::vector<String> autoWrappedLines;
+bool useAutoWrappedLines = false;
 
 uint16_t bgColor   = BLACK;
 uint16_t txtColor  = WHITE;
@@ -370,11 +376,9 @@ void loop() {
         if (update.hasFgColor) {
           txtColor = M5.Display.color565(update.fgR, update.fgG, update.fgB);
         }
-        if (update.textContent.length() > 0) {
-          setText(update.textContent);
-        } else {
-          refreshTextDisplay();
-        }
+        // Update text with font size override if provided
+        int fontOverride = (update.hasFontSize && update.fontSize > 0) ? update.fontSize : 0;
+        setText(update.textContent, fontOverride);
       }
 
       isRenderingNow = false;
