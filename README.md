@@ -7,11 +7,8 @@ Perfect for enhancing productions with on-stage triggers, tally, timers, cues, a
 Features
 - Two display modes:
   • Bitmap Mode — Renders Companion's 64x64 bitmaps upscaled to 128×128
-  • Text Mode (v1.3) — Fast, low-latency, no bitmap fetches
-    - 1–2 chars → Extra-big font
-    - 3 chars → Ultra-large font
-    - 4–6 chars → Large centered font
-    - >6 chars → Auto-wrap multi-line
+  • Text Mode (v1.3) — Fast, lower-latency, no bitmap fetches
+    - Auto-wraps text similar to companion
     - Supports COLOR= and TEXTCOLOR=
 - External RGB LED output on G8/G5/G6 (G7 = Ground), mirrors key colour
 - Interactive boot menu — Hold button during boot to configure settings
@@ -42,10 +39,10 @@ Installation & Usage
 5. Install libraries: M5Unified, WiFiManager, Preferences.
 6. Flash to the AtomS3.
 7. On first boot, device will create a WiFi access point (SSID = m5atom-s3_XXXXX).
-8. Device displays QR code for easy WiFi connection (press button to toggle to text view).
+8. Device displays QR code for easy WiFi connection (press button to toggle details).
 9. Scan QR code or connect manually to the AP, then configure WiFi credentials, Companion IP/Port, and display mode at 192.168.4.1.
 10. Device will connect to WiFi and show "Ready" screen.
-11. In Companion v4: Device is automatically discovered via mDNS, or manually add using deviceID.
+11. In Companion v4: Device is automatically discovered via mDNS and can be added via the companion interface, or boot into Web Config mode to manually change companion settings.
 12. Press button to send KEY-PRESS to Companion. LED mirrors key color.
 
 Boot Menu
@@ -54,8 +51,8 @@ Boot Menu
 - Select: Hold for 1 second to select current option
 - Options:
   - Boot: Normal — Continue normal boot
-  - Boot: Web Config — Open config portal on current WiFi (displays IP + QR code for portal URL)
-  - Boot: Reset — Create WiFi AP for reconfiguration (displays WiFi QR code, press button to toggle to text view)
+  - Boot: Web Config — Open config portal on current WiFi (displays QR code for portal URL, press button to toggle details)
+  - Boot: Reset — Create WiFi AP for reconfiguration (displays WiFi QR code, press button to toggle details)
   - Display: BITMAP/TEXT — Toggle display mode (saves immediately)
   - Rotation: 0°/90°/180°/270° — Adjust text rotation (TEXT mode only, saves immediately)
 
@@ -67,7 +64,7 @@ OTA Firmware Update
 
 Troubleshooting
 Only one letter shows in text mode:
-- Update to v1.3 which fixes base64 decoding issues.
+- Update to v1.3+ which fixes base64 decoding issues.
 
 LED colours wrong:
 - Confirm LED is common-cathode (G7 = Ground).
@@ -78,19 +75,20 @@ Not connecting to Companion:
 - Ensure device and Companion are on same network.
 - Check firewall rules.
 
-Blank screen or crashes:
-- Ensure sendAddDevice() uses BITMAPS=72 (required by bitmap mode).
-
 Version History
-v1.4 (Community)
+v1.4
 - mDNS service discovery for automatic device detection
 - DeviceID format changed to m5atom-s3_XXXXX (last 5 MAC chars)
-- Interactive boot menu for configuration without web portal
-- QR codes for quick AP and config portal connections
+- Interactive boot menu for better web portal control
+- QR codes for quick AP and config portal connections (press button to toggle details)
 - Improved boot messages for better clarity
 - Faster boot time (reduced delays by ~2 seconds)
 - Removed runtime 5s long-press config portal (enables Companion delayed actions)
-- Improved text-mode rendering
+- Overhauled bitmap rendering
+  - uses 64x64 images for better scaling performance, visuals, and bandwidth
+  - draws to screen in chunks instead of pixel by pixel, significantly improving render time
+- Improved text-mode rendering to mimick companion text
+- Added "Reconnecting..." overlay when connection is lost
 
 v1.3
 - Text-only mode with zero bitmap requests

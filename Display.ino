@@ -12,7 +12,6 @@
 
 std::vector<String> splitIntoWords(const String& text);
 void wrapTextToLines(const String& text, int targetWidth, std::vector<String>& outLines);
-bool wrapToLines(const String& src, String& l1, String& l2, String& l3, int& outLines, int maxLines, int targetWidth = -1);
 bool tryFitSegments(const std::vector<String>& segments, int targetWidth, int screenHeight);
 
 // ============================================================================
@@ -156,7 +155,6 @@ void drawCenterText(const String& txt, uint16_t color, uint16_t bg) {
   M5.Display.setTextColor(color, bg);
   M5.Display.setTextDatum(middle_center);
 
-  // Split into lines
   std::vector<String> lines;
   int start = 0;
   while (true) {
@@ -188,22 +186,21 @@ void applyDisplayBrightness() {
 }
 
 void drawBitmapRGB888FullScreen(uint8_t* rgb, int size) {
-  int sw = M5.Display.width();   // 128
-  int sh = M5.Display.height();  // 128
+  int sw = M5.Display.width();
+  int sh = M5.Display.height();
 
-  // Allocate upscaled buffer (128x128x2 = 32KB RGB565)
   uint16_t* upscaled = (uint16_t*)ps_malloc(sw * sh * sizeof(uint16_t));
   if (!upscaled) {
     upscaled = (uint16_t*)malloc(sw * sh * sizeof(uint16_t));
   }
   if (!upscaled) {
     Serial.println("[RENDER] Out of memory!");
-    return;  // Can't render without memory
+    return;
   }
 
-  // Pre-upscale with nearest-neighbor
+  // 2x nearest-neighbor upscale
   for (int y = 0; y < sh; y++) {
-    int srcY = y >> 1;  // Bit shift for 2x scaling
+    int srcY = y >> 1;
     for (int x = 0; x < sw; x++) {
       int srcX = x >> 1;
       int srcIdx = (srcY * size + srcX) * 3;
@@ -211,10 +208,9 @@ void drawBitmapRGB888FullScreen(uint8_t* rgb, int size) {
     }
   }
 
-  // Single block transfer
   M5.Display.startWrite();
   M5.Display.setAddrWindow(0, 0, sw, sh);
-  M5.Display.setSwapBytes(true);  // May be needed for correct color order
+  M5.Display.setSwapBytes(true);
   M5.Display.pushPixels(upscaled, sw * sh);
   M5.Display.setSwapBytes(false);
   M5.Display.endWrite();
@@ -311,15 +307,11 @@ void wrapTextToLines(const String& text, int targetWidth, std::vector<String>& o
 }
 
 void applyFixedFontSize(int ptSize) {
-  // Map Companion point sizes to M5GFX fonts
-  // Font4 = versatile, scales well with textSize
-  // Font8 has limited character support - avoid it
+  // Map Companion point sizes to M5GFX fonts (Font4 scales well, Font8 has limited chars)
   if (ptSize <= 7) {
     M5.Display.setFont(&fonts::Font2);
     M5.Display.setTextSize(1);
-  } else if (ptSize <= 14) {
-    M5.Display.setFont(&fonts::Font4);
-    M5.Display.setTextSize(1);
+  // Skip ptSize <= 14, we don't have enough granularity
   } else if (ptSize <= 18) {
     M5.Display.setFont(&fonts::Font4);
     M5.Display.setTextSize(1);
@@ -335,48 +327,9 @@ void applyFixedFontSize(int ptSize) {
   }
 }
 
-bool wrapToLines(const String& src, String& l1, String& l2, String& l3, int& outLines, int maxLines, int targetWidth) {
-  l1 = "";
-  l2 = "";
-  l3 = "";
-  outLines = 0;
-
-  if (src.length() == 0) return true;
-
-  M5.Display.setTextWrap(false);
-
-  int screenW = (targetWidth > 0) ? targetWidth : M5.Display.width();
-
-  std::vector<String> lines;
-  wrapTextToLines(src, screenW, lines);
-
-  if ((int)lines.size() > maxLines) {
-    return false;
-  }
-
-  outLines = lines.size();
-
-  if (outLines >= 1) l1 = lines[0];
-  if (outLines >= 2) l2 = lines[1];
-  if (outLines >= 3) l3 = lines[2];
-
-  autoWrappedLines.clear();
-  for (int i = 0; i < outLines && i < maxLines; i++) {
-    autoWrappedLines.push_back(lines[i]);
-  }
-
-  return true;
-}
 
 void analyseLayout(int fontSizeOverride) {
-  line1 = "";
-  line2 = "";
-  line3 = "";
-  numLines = 0;
-  useManualLines = false;
-  useAutoWrappedLines = false;
   manualLines.clear();
-  autoWrappedLines.clear();
 
   if (currentText.length() == 0) {
     return;
@@ -457,15 +410,6 @@ void analyseLayout(int fontSizeOverride) {
   if ((int)manualLines.size() > 5) {
     manualLines.resize(5);
   }
-
-  // Step 4: Set rendering mode
-  if (hasManualNewlines || manualLines.size() > 1) {
-    useManualLines = true;
-  } else if (manualLines.size() == 1) {
-    // Single line
-    numLines = 1;
-    line1 = manualLines[0];
-  }
 }
 
 bool tryFitSegments(const std::vector<String>& segments, int targetWidth, int screenHeight) {
@@ -506,88 +450,32 @@ void refreshTextDisplay() {
   M5.Display.fillScreen(bgColor);
   M5.Display.setTextColor(txtColor, bgColor);
   M5.Display.setTextWrap(false);
-
-  // Clear any clipping to allow large text to render even if it exceeds margins
   M5.Display.clearClipRect();
 
-  if (currentText.length() == 0) {
+  if (currentText.length() == 0 || manualLines.size() == 0) {
     drawTextPressedBorderIfNeeded();
     return;
   }
 
   int screenW = M5.Display.width();
   int screenH = M5.Display.height();
+  int lineHeight = M5.Display.fontHeight();
+  int lines = manualLines.size();
 
-  // Manual multi-line mode
-  if (useManualLines) {
-    Serial.printf("[RENDER] Manual multi-line mode: %d lines\n", manualLines.size());
+  if (lines == 1) {
+    // Single line - use middle centering
+    int centerY = (screenH / 2) + (lineHeight / 8);
+    M5.Display.setTextDatum(middle_center);
+    M5.Display.drawString(manualLines[0], screenW / 2, centerY);
+  } else {
+    // Multi-line - use top centering
     M5.Display.setTextDatum(top_center);
-
-    int lineHeight  = M5.Display.fontHeight();
-    int lines       = manualLines.size();
     int totalHeight = lineHeight * lines;
-
-    // Calculate top Y position with baseline offset for better centering
-    int baseTopY = (screenH - totalHeight) / 2;
-    int topY = baseTopY + (lineHeight / 5);
-
-    Serial.printf("[RENDER] Manual: lineHeight=%d totalHeight=%d baseTopY=%d topY=%d\n",
-                  lineHeight, totalHeight, baseTopY, topY);
+    int topY = (screenH - totalHeight) / 2 + (lineHeight / 5);
 
     for (int i = 0; i < lines; i++) {
       int y = topY + i * lineHeight;
       M5.Display.drawString(manualLines[i], screenW / 2, y);
-    }
-
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
-
-  // Single-line rendering (numLines == 1)
-  if (numLines == 1) {
-    Serial.printf("[RENDER] Single-line mode: fontHeight=%d\n", M5.Display.fontHeight());
-
-    // For large fonts, shift down by 10-15% of font height to improve vertical centering
-    // This compensates for M5GFX baseline positioning behavior
-    int lineHeight = M5.Display.fontHeight();
-    int yOffset = lineHeight / 8;  // Shift down by 12.5% of font height
-    int centerY = (screenH / 2) + yOffset;
-
-    Serial.printf("[RENDER] Single: screenH=%d centerY=%d yOffset=%d\n", screenH, centerY, yOffset);
-
-    M5.Display.setTextDatum(middle_center);
-    M5.Display.drawString(line1, screenW / 2, centerY);
-  } else {
-    // Multi-line rendering (numLines > 1)
-    Serial.printf("[RENDER] Multi-line mode: %d lines, autoWrapped=%d\n",
-                  numLines, useAutoWrappedLines ? 1 : 0);
-
-    M5.Display.setTextDatum(top_center);
-
-    int lineHeight  = M5.Display.fontHeight();
-    int totalHeight = lineHeight * numLines;
-
-    // Calculate top Y position with baseline offset for better centering
-    // M5GFX fontHeight() includes ascent + descent, but top_center datum
-    // positions at the top of ascent. Subtract ~20% offset to shift text down.
-    int baseTopY = (screenH - totalHeight) / 2;
-    int topY = baseTopY + (lineHeight / 5);
-
-    Serial.printf("[RENDER] Multi: lineHeight=%d totalHeight=%d baseTopY=%d topY=%d\n",
-                  lineHeight, totalHeight, baseTopY, topY);
-
-    if (useAutoWrappedLines && autoWrappedLines.size() > 0) {
-      for (int i = 0; i < numLines && i < (int)autoWrappedLines.size(); i++) {
-        int y = topY + i * lineHeight;
-        M5.Display.drawString(autoWrappedLines[i], screenW / 2, y);
-      }
-    } else {
-      // Fallback to legacy 3-line array
-      String lines[3] = { line1, line2, line3 };
-      for (int i = 0; i < numLines && i < 3; i++) {
-        int y = topY + i * lineHeight;
-        M5.Display.drawString(lines[i], screenW / 2, y);
-      }
     }
   }
 
@@ -598,63 +486,10 @@ void refreshTextDisplay() {
 // Text Mode Update Functions
 // ============================================================================
 
-void setTextNow(const String& txt, int fontSizeOverride = 0) {
+void setText(const String& txt, int fontSizeOverride) {
   currentText = txt;
   analyseLayout(fontSizeOverride);
   refreshTextDisplay();
-}
-
-void setText(const String& txt, int fontSizeOverride) {
-  setTextNow(txt, fontSizeOverride);
-}
-
-// ============================================================================
-// Text Mode API Handlers
-// ============================================================================
-
-void handleKeyStateTextField(const String& line) {
-  int tPos = line.indexOf("TEXT=");
-  if (tPos < 0) return;
-
-  int firstQuote = line.indexOf('"', tPos);
-  if (firstQuote < 0) return;
-
-  int secondQuote = line.indexOf('"', firstQuote + 1);
-  if (secondQuote < 0) return;
-
-  String textField = line.substring(firstQuote + 1, secondQuote);
-  String decoded   = decodeCompanionText(textField);
-  decoded.replace("\\n", "\n");
-
-  Serial.print("[API] TEXT encoded=\"");
-  Serial.print(textField);
-  Serial.print("\" decoded=\"");
-  Serial.print(decoded);
-  Serial.println("\"");
-
-  setText(decoded);
-}
-
-void handleTextModeColors(const String& line) {
-  int r, g, b;
-  bool bgOk  = false;
-  bool txtOk = false;
-
-  if (parseColorToken(line, "COLOR", r, g, b)) {
-    bgColor = M5.Display.color565(r, g, b);
-    bgOk = true;
-    Serial.printf("[API] TEXT BG COLOR r=%d g=%d b=%d\n", r, g, b);
-  }
-
-  if (parseColorToken(line, "TEXTCOLOR", r, g, b)) {
-    txtColor = M5.Display.color565(r, g, b);
-    txtOk = true;
-    Serial.printf("[API] TEXT FG COLOR r=%d g=%d b=%d\n", r, g, b);
-  }
-
-  if (bgOk || txtOk) {
-    refreshTextDisplay();
-  }
 }
 
 // ============================================================================
@@ -662,35 +497,28 @@ void handleTextModeColors(const String& line) {
 // ============================================================================
 
 void drawReconnectingOverlay() {
-  int screenW = M5.Display.width();   // 128
-  int screenH = M5.Display.height();  // 128
+  int screenW = M5.Display.width();
+  int screenH = M5.Display.height();
 
-  // Box dimensions - centered
   int boxWidth = 110;
   int boxHeight = 30;
   int boxX = (screenW - boxWidth) / 2;
   int boxY = (screenH - boxHeight) / 2;
 
-  // Colors
-  uint16_t bgColor = M5.Display.color565(40, 40, 40);      // Dark gray
-  uint16_t borderColor = M5.Display.color565(255, 0, 0); // Red
-  uint16_t textColor = M5.Display.color565(255, 255, 255);   // White
+  uint16_t bgColor = M5.Display.color565(40, 40, 40);
+  uint16_t borderColor = M5.Display.color565(255, 0, 0);
+  uint16_t textColor = M5.Display.color565(255, 255, 255);
 
-  // Draw Bakcground "X"
   for (int i = 0; i < 4; i++) {
     M5.Display.drawRect(i, i, screenW - i * 2, screenH - i * 2, borderColor);
   }
   M5.Display.drawLine(0, 0, screenW, screenH, borderColor);
   M5.Display.drawLine(0, screenH, screenW, 0, borderColor);
 
-  // Draw background box
   M5.Display.fillRect(boxX, boxY, boxWidth, boxHeight, bgColor);
-
-  // Draw 2px border
   M5.Display.drawRect(boxX, boxY, boxWidth, boxHeight, borderColor);
   M5.Display.drawRect(boxX+1, boxY+1, boxWidth-2, boxHeight-2, borderColor);
 
-  // Draw text
   M5.Display.setFont(&fonts::Font0);
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(textColor, bgColor);

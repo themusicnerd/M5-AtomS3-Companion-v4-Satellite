@@ -73,15 +73,22 @@ void saveParamCallback() {
 // Preferences Management
 // ============================================================================
 
+int degreesToRotationIndex(int degrees) {
+  if      (degrees == 90)  return 1;
+  else if (degrees == 180) return 2;
+  else if (degrees == 270) return 3;
+  else                     return 0;
+}
+
 void loadPreferences() {
   preferences.begin("companion", false);
   preferences.putString("deviceid", deviceID);
 
   if (preferences.getString("companionip").length() > 0)
-    preferences.getString("companionip").toCharArray(companion_host, sizeof(companion_host));
+    preferences.getString("companionip").toCharArray(companion_host.data(), companion_host.size());
 
   if (preferences.getString("companionport").length() > 0)
-    preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
+    preferences.getString("companionport").toCharArray(companion_port.data(), companion_port.size());
 
   String modeStr = preferences.getString("displayMode", "bitmap");
   String rotStr  = preferences.getString("rotation",   "0");
@@ -92,19 +99,15 @@ void loadPreferences() {
     displayMode = DISPLAY_BITMAP;
   }
 
-  // Map degrees -> rotation index
   int rotDeg = rotStr.toInt();
-  if      (rotDeg == 90)  screenRotation = 1;
-  else if (rotDeg == 180) screenRotation = 2;
-  else if (rotDeg == 270) screenRotation = 3;
-  else                    screenRotation = 0;
+  screenRotation = degreesToRotationIndex(rotDeg);
 
   preferences.end();
 
   Serial.print("[Prefs] Companion IP: ");
-  Serial.println(companion_host);
+  Serial.println(companion_host.data());
   Serial.print("[Prefs] Companion Port: ");
-  Serial.println(companion_port);
+  Serial.println(companion_port.data());
   Serial.print("[Prefs] Display Mode: ");
   Serial.println(displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP");
   Serial.print("[Prefs] Text rotation degrees: ");
@@ -118,65 +121,6 @@ void saveDisplaySettings() {
   preferences.putString("displayMode", displayMode == DISPLAY_TEXT ? "text" : "bitmap");
   preferences.putString("rotation", String(screenRotation * 90));
   preferences.end();
-}
-
-// ============================================================================
-// Config Portal
-// ============================================================================
-
-void startConfigPortal() {
-  Serial.println("[WiFi] Entering CONFIG PORTAL mode");
-
-  preferences.begin("companion", true);
-  String savedHost = preferences.getString("companionip", "Companion IP");
-  String savedPort = preferences.getString("companionport", "16622");
-  preferences.end();
-
-  char displayModeHTML[512];
-  char rotationHTML[768];
-  buildDisplayModeHTML(displayModeHTML, sizeof(displayModeHTML), displayMode);
-  buildRotationHTML(rotationHTML, sizeof(rotationHTML), screenRotation);
-
-  custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", savedHost.c_str(), 40);
-  custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", savedPort.c_str(), 6);
-  custom_displayMode   = new WiFiManagerParameter(displayModeHTML);
-  custom_rotation      = new WiFiManagerParameter(rotationHTML);
-
-  wifiManager.addParameter(custom_companionIP);
-  wifiManager.addParameter(custom_companionPort);
-  wifiManager.addParameter(custom_displayMode);
-  wifiManager.addParameter(custom_rotation);
-  wifiManager.setSaveParamsCallback(saveParamCallback);
-
-  std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
-  wifiManager.setMenu(menu);
-  wifiManager.setClass("invert");
-  wifiManager.setConfigPortalTimeout(0);
-
-  wifiManager.setAPCallback([](WiFiManager* wm) {
-    Serial.println("[WiFi] Config portal started");
-  });
-
-  String shortDeviceID = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
-
-  wifiManager.startConfigPortal(shortDeviceID.c_str(), "");
-  Serial.printf("[WiFi] Config portal started - SSID: %s\n", shortDeviceID.c_str());
-
-  // Update companion settings
-  strncpy(companion_host, custom_companionIP->getValue(), sizeof(companion_host));
-  companion_host[sizeof(companion_host) - 1] = '\0';
-
-  strncpy(companion_port, custom_companionPort->getValue(), sizeof(companion_port));
-  companion_port[sizeof(companion_port) - 1] = '\0';
-
-  preferences.begin("companion", false);
-  preferences.putString("companionip", String(companion_host));
-  preferences.putString("companionport", String(companion_port));
-  preferences.end();
-
-  Serial.println("[WiFi] Config portal completed");
-  Serial.printf("[WiFi] Companion Host: %s\n", companion_host);
-  Serial.printf("[WiFi] Companion Port: %s\n", companion_port);
 }
 
 // ============================================================================
@@ -274,7 +218,7 @@ void runBootMenu() {
     }
 
     // Hold for 1s: select item
-    if (M5.BtnA.pressedFor(1000) && !holdHandled && !waitButtonRelease) {
+    if (M5.BtnA.pressedFor(500) && !holdHandled && !waitButtonRelease) {
       handleMenuSelection(currentMenuItem);
       holdHandled = true;
       needsRedraw = true;

@@ -94,6 +94,7 @@ struct UpdateQueue {
 // ============================================================================
 
 // Main helpers
+String getShortDeviceID();
 void hideReconnectIndicator();
 void resetConnectionHealth();
 unsigned long getBackoffInterval(unsigned long sinceTime);
@@ -107,8 +108,6 @@ void drawBitmapRGB888FullScreen(uint8_t* rgb, int size);
 void refreshTextDisplay();
 void setText(const String& txt, int fontSizeOverride = 0);
 void analyseLayout(int fontSizeOverride = 0);
-void handleKeyStateTextField(const String& line);
-void handleTextModeColors(const String& line);
 void drawReconnectingOverlay();
 
 // Hardware.ino
@@ -121,10 +120,12 @@ void sendAddDevice();
 void parseAPI(const String& apiData);
 void handleKeyState(const String& line);
 void setupRestServer();
+void runAPConfigPortal(const String& wifiHostname);
 void connectToNetwork();
 void initializeMDNS();
 
 // Config.ino
+int degreesToRotationIndex(int degrees);
 void loadPreferences();
 void saveParamCallback();
 void runBootMenu();
@@ -145,8 +146,8 @@ WiFiClient  client;
 WebServer   restServer(9999);
 
 // Companion server
-char companion_host[40] = "";
-char companion_port[6]  = "16622";
+std::array<char, 40> companion_host = {""};
+std::array<char, 6> companion_port = {"16622"};
 
 // Static IP (0.0.0.0 = DHCP)
 IPAddress stationIP   = IPAddress(0, 0, 0, 0);
@@ -193,17 +194,9 @@ int screenRotation = 0;  // 0=0°, 1=90°, 2=180°, 3=270° (TEXT mode only)
 bool textPressedBorder = false;
 
 String currentText  = "";
-String line1        = "";
-String line2        = "";
-String line3        = "";
-int    numLines     = 0;
 const int MAX_AUTO_LINES = 7;
 
 std::vector<String> manualLines;
-bool useManualLines = false;
-
-std::vector<String> autoWrappedLines;
-bool useAutoWrappedLines = false;
 
 uint16_t bgColor   = BLACK;
 uint16_t txtColor  = WHITE;
@@ -245,6 +238,10 @@ void enqueueUpdate(const PendingUpdate& update) {
 // ============================================================================
 // Connection State Helpers
 // ============================================================================
+
+String getShortDeviceID() {
+  return "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
+}
 
 void hideReconnectIndicator() {
   if (showingReconnectIndicator) {
@@ -380,8 +377,8 @@ void setup() {
   setExternalLedColor(0, 0, 0);
 
   String waitMsg =
-    "Ready\n\n" +
-    String(companion_host) + ":" + String(companion_port) +
+    "Waiting for\nCompanion\n\n" +
+    String(companion_host.data()) + ":" + String(companion_port.data()) +
     "\n\n" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " mode";
 
   drawCenterText(waitMsg, WHITE, BLACK);
@@ -427,7 +424,7 @@ void loop() {
 
     Serial.printf("[NET] Reconnecting (backoff: %lus)\n", reconnectInterval / 1000);
 
-    if (client.connect(companion_host, atoi(companion_port))) {
+    if (client.connect(companion_host.data(), atoi(companion_port.data()))) {
       Serial.println("[NET] Connected successfully");
       connectionState = CONN_CONNECTED;
       resetConnectionHealth();
@@ -502,7 +499,7 @@ void loop() {
 
     // Handle button events
     if (M5.BtnA.wasPressed()) {
-      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);
+      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);  // Keep colon format
       client.println("KEY-PRESS DEVICEID=" + companionDeviceID + " KEY=0 PRESSED=true");
       if (displayMode == DISPLAY_TEXT) {
         textPressedBorder = true;
@@ -511,7 +508,7 @@ void loop() {
     }
 
     if (M5.BtnA.wasReleased()) {
-      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);
+      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);  // Keep colon format
       client.println("KEY-PRESS DEVICEID=" + companionDeviceID + " KEY=0 PRESSED=false");
       if (displayMode == DISPLAY_TEXT) {
         textPressedBorder = false;
