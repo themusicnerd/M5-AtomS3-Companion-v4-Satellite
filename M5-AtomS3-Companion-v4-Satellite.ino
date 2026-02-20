@@ -1,31 +1,21 @@
 /*
-  ------------------------------------------------------------
-  M5 AtomS3 Companion v4
-  Single Button Satellite (Bitmap + Text Mode)
-  Author: Adrian Davis
-  URL: https://github.com/themusicnerd/M5-AtomS3-Companion-v4-Satellite
-  License: MIT
-
-  Features:
-    - Companion v4 Satellite API support
-    - Single-button surface + external RGB LED
-    - Two display modes (WiFi-configurable):
-        * BITMAP  : uses 72x72 Companion bitmaps (RGB/RGBA) upscaled to 128x128
-        * TEXT    : Companion TEXT (base64) rendered with:
-            - Extra-big (≤2 chars)   : huge font, centered
-            - Ultra-large (3 chars)  : very big font, centered
-            - Large (4–6 chars)      : big font, centered
-            - Normal (>6 chars)      : multi-line, centered (auto-wrap or manual "\n")
-        * Uses COLOR/TEXTCOLOR for background/text in TEXT mode
-        * Text Rotate (0/90/180/270 in WiFiManager, TEXT mode only)
-        * Yellow 4px border when button is pressed (TEXT mode only)
-    - External RGB LED PWM output (G5 RED / G6 GREEN / G8 BLUE + G7 GND)
-    - WiFiManager config portal (hold BtnA for 5s)
-    - OTA firmware updates
-    - Full MAC-based deviceID (AtomS3_<MAC>)
-    - Auto reconnect, ping, and key-release failsafe
-  ------------------------------------------------------------
-*/
+ * ============================================================================
+ * M5 AtomS3 Companion v4 Satellite
+ * ============================================================================
+ *
+ * Author: Adrian Davis
+ * URL: https://github.com/themusicnerd/M5-AtomS3-Companion-v4-Satellite
+ * License: MIT
+ *
+ * Single-button Companion satellite with external RGB LED
+ * - Two display modes: BITMAP (72x72 upscaled) or TEXT (dynamic sizing)
+ * - WiFiManager config portal with interactive boot menu
+ * - REST API on port 9999, mDNS discovery
+ * - OTA updates, auto-reconnect
+ *
+ * External LED pins: G8 (Red), G5 (Green), G6 (Blue), G7 (Ground)
+ * ============================================================================
+ */
 
 #include <M5Unified.h>
 #include <M5GFX.h>
@@ -41,55 +31,144 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 
-// ------------------------------------------------------------
-// Globals / Config
-// ------------------------------------------------------------
+// ============================================================================
+// Display Mode Constants
+// ============================================================================
+
+#define DISPLAY_BITMAP 0
+#define DISPLAY_TEXT   1
+
+// ============================================================================
+// Data Structures
+// ============================================================================
+
+// Update data structure
+struct PendingUpdate {
+  String bitmapBase64;
+  String textContent;
+  int colorR, colorG, colorB;
+  int bgR, bgG, bgB;
+  int fgR, fgG, fgB;
+  int fontSize;  // 0 = auto, >0 = specific point size from Companion
+  bool hasColor;
+  bool hasBgColor;
+  bool hasFgColor;
+  bool hasFontSize;
+  bool hasData;  // true if update is pending
+};
+
+// Simple 2-item queue for rapid button events
+struct UpdateQueue {
+  PendingUpdate items[2];
+  int count;  // 0, 1, or 2
+
+  UpdateQueue() : count(0) {}
+
+  void push(const PendingUpdate& update) {
+    if (count < 2) {
+      items[count] = update;
+      count++;
+    } else {
+      // Queue full: drop oldest, keep newest
+      items[0] = items[1];
+      items[1] = update;
+    }
+  }
+
+  PendingUpdate pop() {
+    PendingUpdate result = items[0];
+    if (count > 1) {
+      items[0] = items[1];
+    }
+    count--;
+    return result;
+  }
+
+  bool isEmpty() const {
+    return count == 0;
+  }
+};
+
+// ============================================================================
+// Function Prototypes
+// ============================================================================
+
+// Main helpers
+String getShortDeviceID();
+void hideReconnectIndicator();
+void resetConnectionHealth();
+unsigned long getBackoffInterval(unsigned long sinceTime);
+
+// Display.ino
+bool parseColorToken(const String& line, const String& key, int &r, int &g, int &b);
+void clearScreen(uint16_t color = BLACK);
+void drawCenterText(const String& txt, uint16_t color = WHITE, uint16_t bg = BLACK);
+void applyDisplayBrightness();
+void drawBitmapRGB888FullScreen(uint8_t* rgb, int size);
+void refreshTextDisplay();
+void setText(const String& txt, int fontSizeOverride = 0);
+void analyseLayout(int fontSizeOverride = 0);
+void drawReconnectingOverlay();
+
+// Hardware.ino
+void setupLED();
+void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b);
+void updateReconnectingLED();
+
+// Network.ino
+void sendAddDevice();
+void parseAPI(const String& apiData);
+void handleKeyState(const String& line);
+void setupRestServer();
+void runAPConfigPortal(const String& wifiHostname);
+void connectToNetwork();
+void initializeMDNS();
+
+// Config.ino
+int degreesToRotationIndex(int degrees);
+void loadPreferences();
+void saveParamCallback();
+void runBootMenu();
+void buildDisplayModeHTML(char* buffer, size_t bufferSize, int currentMode);
+void buildRotationHTML(char* buffer, size_t bufferSize, int currentRotation);
+
+// Update handling
+void enqueueUpdate(const PendingUpdate& update);
+void processPendingBitmap(const String& bitmapBase64);
+
+// ============================================================================
+// Global Objects & State
+// ============================================================================
 
 Preferences preferences;
 WiFiManager wifiManager;
 WiFiClient  client;
-
-// REST API Server for Companion configuration
-WebServer restServer(9999);
+WebServer   restServer(9999);
 
 // Companion server
-char companion_host[40] = "Companion IP";
-char companion_port[6]  = "16622";
+std::array<char, 40> companion_host = {""};
+std::array<char, 6> companion_port = {"16622"};
 
 // Static IP (0.0.0.0 = DHCP)
 IPAddress stationIP   = IPAddress(0, 0, 0, 0);
 IPAddress stationGW   = IPAddress(0, 0, 0, 0);
 IPAddress stationMask = IPAddress(255, 255, 255, 0);
 
-// Device ID – full MAC will be appended
 String deviceID = "";
-
-// WiFi hostname for mDNS
-String wifiHostname = "";
-
-// Boot counter for config portal trigger
-const uint8_t BOOT_FAIL_LIMIT = 1;
-int bootCountCached = 0;
-
-// Config portal status flag
-bool configPortalActive = false;
-
-// Flag to show config portal message immediately after display initialization
-bool showConfigPortalMessage = false;
-
-// AP password for config portal (empty = open)
 const char* AP_password = "";
+
+bool forceConfigPortalOnBoot = false;
+bool forceRouterModeOnBoot  = false;
 
 // Timing
 unsigned long lastPingTime    = 0;
 unsigned long lastConnectTry  = 0;
-const unsigned long connectRetryMs = 5000;
-const unsigned long pingIntervalMs = 2000;
+unsigned long firstDisconnectTime = 0;         // When we first lost connection
+const unsigned long pingIntervalMs = 1000;
 
-// Brightness (0–100)
+// Display & LED
 int brightness = 100;
 
-// External RGB LED (Jaycar RGB LED) --------------------------
 const int LED_PIN_RED   = G8;
 const int LED_PIN_GREEN = G5;
 const int LED_PIN_BLUE  = G6;
@@ -101,1291 +180,143 @@ const uint8_t  pwmResolution = 8;
 uint8_t lastColorR = 0;
 uint8_t lastColorG = 0;
 uint8_t lastColorB = 0;
-// ------------------------------------------------------------
 
-// Display mode
-enum DisplayMode {
-  DISPLAY_BITMAP = 0,
-  DISPLAY_TEXT   = 1
-};
-int displayMode = DISPLAY_BITMAP; // default
+int displayMode = DISPLAY_BITMAP;
 
-// WiFiManager custom params
-WiFiManagerParameter* custom_companionIP;
-WiFiManagerParameter* custom_companionPort;
-WiFiManagerParameter* custom_displayMode;
-WiFiManagerParameter* custom_rotation = nullptr;   // rotation parameter
-int screenRotation = 0;  // 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° (TEXT mode only)
+WiFiManagerParameter* custom_companionIP = nullptr;
+WiFiManagerParameter* custom_companionPort = nullptr;
+WiFiManagerParameter* custom_displayMode = nullptr;
+WiFiManagerParameter* custom_rotation = nullptr;
 
-// TEXT mode pressed-border flag (yellow outline when button pressed)
+int screenRotation = 0;  // 0=0°, 1=90°, 2=180°, 3=270° (TEXT mode only)
+
+// Text mode state
 bool textPressedBorder = false;
 
-// Forward declarations for text mode / brightness
-void setText(const String& txt);
-void applyDisplayBrightness();
-
-// ------------------------------------------------------------
-// Simple logger
-// ------------------------------------------------------------
-void logger(const String& s, const String& type = "info") {
-  Serial.println(s);
-}
-
-String getParam(const String& name) {
-  if (wifiManager.server && wifiManager.server->hasArg(name))
-    return wifiManager.server->arg(name);
-  return "";
-}
-
-// ------------------------------------------------------------
-// Save WiFiManager params -> Preferences
-// ------------------------------------------------------------
-void saveParamCallback() {
-  String str_companionIP   = getParam("companionIP");
-  String str_companionPort = getParam("companionPort");
-  String str_displayMode   = getParam("displayMode");
-  String str_rotation      = getParam("rotation");   // rotation (0/90/180/270)
-
-  preferences.begin("companion", false);
-  if (str_companionIP.length() > 0)    preferences.putString("companionip",   str_companionIP);
-  if (str_companionPort.length() > 0)  preferences.putString("companionport", str_companionPort);
-  if (str_displayMode.length() > 0)    preferences.putString("displayMode",   str_displayMode);
-  if (str_rotation.length() > 0)       preferences.putString("rotation",      str_rotation);
-  preferences.end();
-}
-
-// ------------------------------------------------------------
-// Boot counter management
-// ------------------------------------------------------------
-int eepromReadBootCounter() {
-  preferences.begin("companion", true);
-  int count = preferences.getInt("bootCounter", 0);
-  preferences.end();
-  return count;
-}
-
-void eepromWriteBootCounter(int count) {
-  preferences.begin("companion", false);
-  preferences.putInt("bootCounter", count);
-  preferences.end();
-}
-
-// ------------------------------------------------------------
-// Config portal functions
-// ------------------------------------------------------------
-void startConfigPortal() {
-  Serial.println("[WiFi] Entering CONFIG PORTAL mode");
-  
-  // Load Companion config from preferences (for default field values)
-  preferences.begin("companion", true);
-  String savedHost = preferences.getString("companionip", "Companion IP");
-  String savedPort = preferences.getString("companionport", "16622");
-  preferences.end();
-
-  // Prepare WiFiManager with params
-  custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", savedHost.c_str(), 40);
-  custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", savedPort.c_str(), 6);
-
-  wifiManager.addParameter(custom_companionIP);
-  wifiManager.addParameter(custom_companionPort);
-  wifiManager.setSaveParamsCallback(saveParamCallback);
-
-  std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
-  wifiManager.setMenu(menu);
-  wifiManager.setClass("invert");
-  wifiManager.setConfigPortalTimeout(0); // No timeout when we explicitly call config mode
-
-  wifiManager.setAPCallback([](WiFiManager* wm) {
-    Serial.println("[WiFi] Config portal started");
-    configPortalActive = true;
-  });
-
-  // Start AP + portal, blocks until user saves or exits
-  String shortDeviceID = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
-  
-  wifiManager.startConfigPortal(shortDeviceID.c_str(), AP_password);
-  Serial.printf("[WiFi] Config portal started - SSID: %s\n", shortDeviceID.c_str());
-
-  // After returning, update our Companion host/port and persist
-  strncpy(companion_host, custom_companionIP->getValue(), sizeof(companion_host));
-  companion_host[sizeof(companion_host) - 1] = '\0';
-
-  strncpy(companion_port, custom_companionPort->getValue(), sizeof(companion_port));
-  companion_port[sizeof(companion_port) - 1] = '\0';
-
-  // Save to preferences
-  preferences.begin("companion", false);
-  preferences.putString("companionip", String(companion_host));
-  preferences.putString("companionport", String(companion_port));
-  preferences.end();
-
-  Serial.println("[WiFi] Config portal completed");
-  Serial.printf("[WiFi] Companion Host: %s\n", companion_host);
-  Serial.printf("[WiFi] Companion Port: %s\n", companion_port);
-  configPortalActive = false; // Reset flag when portal exits
-}
-
-// ------------------------------------------------------------
-// External LED Handling (new LEDC API: ledcAttach / ledcWrite)
-// ------------------------------------------------------------
-void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
-  lastColorR = r;
-  lastColorG = g;
-  lastColorB = b;
-
-  // For *common cathode* (LED GND to G7):
-  uint8_t scaledR = r * max(brightness, 15) / 100;
-  uint8_t scaledG = g * max(brightness, 15) / 100;
-  uint8_t scaledB = b * max(brightness, 15) / 100;
-
-  // For *common anode* (LED VCC to +3V3), uncomment below:
-  // scaledR = 255 - scaledR;
-  // scaledG = 255 - scaledG;
-  // scaledB = 255 - scaledB;
-
-  Serial.print("[LED] setExternalLedColor raw r/g/b = ");
-  Serial.print(r); Serial.print("/");
-  Serial.print(g); Serial.print("/");
-  Serial.print(b);
-  Serial.print("  scaled = ");
-  Serial.print(scaledR); Serial.print("/");
-  Serial.print(scaledG); Serial.print("/");
-  Serial.println(scaledB);
-
-  ledcWrite(LED_PIN_RED,   scaledR);
-  ledcWrite(LED_PIN_GREEN, scaledG);
-  ledcWrite(LED_PIN_BLUE,  scaledB);
-}
-
-// ------------------------------------------------------------
-// Display Helpers (shared / boot messages)
-// ------------------------------------------------------------
-void clearScreen(uint16_t color = BLACK) {
-  M5.Display.fillScreen(color);
-}
-
-void drawCenterText(const String& txt, uint16_t color = WHITE, uint16_t bg = BLACK) {
-  M5.Display.fillScreen(bg);
-  M5.Display.setFont(&fonts::Font0);   // small, clean status font
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(color, bg);
-  M5.Display.setTextDatum(middle_center);
-
-  // Split into lines
-  std::vector<String> lines;
-  int start = 0;
-  while (true) {
-    int idx = txt.indexOf('\n', start);
-    if (idx < 0) {
-      lines.push_back(txt.substring(start));
-      break;
-    }
-    lines.push_back(txt.substring(start, idx));
-    start = idx + 1;
-  }
-
-  int lineHeight  = M5.Display.fontHeight();
-  int totalHeight = lineHeight * lines.size();
-  int topY        = (M5.Display.height() - totalHeight) / 2 + (lineHeight / 2);
-
-  for (int i = 0; i < (int)lines.size(); i++) {
-    int y = topY + i * lineHeight;
-    M5.Display.drawString(lines[i], M5.Display.width() / 2, y);
-  }
-}
-
-// ------------------------------------------------------------
-// BITMAP MODE: Draw 72x72 RGB888 / RGBA upscaled to full screen
-// ------------------------------------------------------------
-void drawBitmapRGB888FullScreen(uint8_t* rgb, int size) {
-  int sw = M5.Display.width();
-  int sh = M5.Display.height();
-
-  for (int y = 0; y < sh; y++) {
-    int srcY = (y * size) / sh;
-    for (int x = 0; x < sw; x++) {
-      int srcX = (x * size) / sw;
-      int idx = (srcY * size + srcX) * 3;
-      M5.Display.drawPixel(x, y, M5.Display.color565(rgb[idx], rgb[idx+1], rgb[idx+2]));
-    }
-  }
-}
-
-// ------------------------------------------------------------
-// TEXT MODE: Globals and Helpers
-// ------------------------------------------------------------
-
-// Base64 table for text decoding
-const char* B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-int b64Index(char c) {
-  const char* p = strchr(B64_TABLE, c);
-  if (!p) return -1;
-  return (int)(p - B64_TABLE);
-}
-
-String decodeBase64(const String& input) {
-  int len = input.length();
-  int val = 0;
-  int valb = -8;
-  String out;
-
-  for (int i = 0; i < len; i++) {
-    char c = input[i];
-    if (c == '=') break;
-    int idx = b64Index(c);
-    if (idx < 0) break;  // invalid char – stop decoding
-
-    val = (val << 6) + idx;
-    valb += 6;
-    if (valb >= 0) {
-      char outChar = (char)((val >> valb) & 0xFF);
-      out += outChar;
-      valb -= 8;
-    }
-  }
-  return out;
-}
-
-// Text layout state (no scrolling anymore)
 String currentText  = "";
-String line1        = "";
-String line2        = "";
-String line3        = "";
-int    numLines     = 0;                 // 0..X for auto-wrap
-const int MAX_AUTO_LINES = 7;           // Auto-wrap up to this amount of lines
+const int MAX_AUTO_LINES = 7;
 
-// Manual line handling (\n)
 std::vector<String> manualLines;
-bool useManualLines = false;
 
 uint16_t bgColor   = BLACK;
 uint16_t txtColor  = WHITE;
 
-// Apply Companion brightness (0–100) to display
-void applyDisplayBrightness() {
-  int p = brightness;
-  if (p < 0)   p = 0;
-  if (p > 100) p = 100;
-  uint8_t level = map(p, 0, 100, 0, 255);
-  M5.Display.setBrightness(level);
+// Update queue state
+UpdateQueue updateQueue;
+bool isRenderingNow = false;
+unsigned long lastRenderDuration = 0;
+
+// Connection health tracking
+unsigned long lastMessageTime = 0;              // Timestamp of last received message
+unsigned long lastContentUpdateTime = 0;        // Timestamp of last KEY-STATE (bitmap/text)
+int unansweredPingCount = 0;                    // Number of pings sent without any response
+const int maxUnansweredPings = 2;               // Disconnect after 2 unanswered pings
+bool hasConnectedOnce = false;                  // Track if we've ever successfully connected
+
+// Connection state
+enum ConnectionState {
+  CONN_CONNECTED,      // Healthy connection
+  CONN_DISCONNECTED,   // TCP down OR message timeout
+  CONN_RECONNECTING    // Actively reconnecting
+};
+ConnectionState connectionState = CONN_CONNECTED;  // Start in CONNECTED (boot screen handles initial state)
+bool showingReconnectIndicator = false;
+
+// LED blink state
+unsigned long lastBlinkTime = 0;
+const unsigned long blinkIntervalMs = 500;  // 500ms blink cycle
+bool blinkState = false;
+
+void logger(const String& s, const String& type = "info") {
+  Serial.println(s);
 }
 
-// Decode Companion TEXT (base64 → UTF-8 or pass-through)
-String decodeCompanionText(const String& encoded) {
-  if (encoded.length() == 0) return encoded;
-
-  bool looksBase64 = true;
-  for (size_t i = 0; i < encoded.length(); i++) {
-    char c = encoded[i];
-    if (!((c >= 'A' && c <= 'Z') ||
-          (c >= 'a' && c <= 'z') ||
-          (c >= '0' && c <= '9') ||
-          c == '+' || c == '/' || c == '=')) {
-      looksBase64 = false;
-      break;
-    }
-  }
-
-  if (!looksBase64) return encoded;
-
-  String decoded = decodeBase64(encoded);
-  if (decoded.length() == 0) return encoded;
-  return decoded;
+void enqueueUpdate(const PendingUpdate& update) {
+  updateQueue.push(update);
 }
 
-// Parse COLOR=/TEXTCOLOR= in forms:
-//   #RRGGBB
-//   R,G,B
-//   rgb(r,g,b)
-//   rgba(r,g,b,a)
-bool parseColorToken(const String& line, const String& key, int &r, int &g, int &b) {
-  int pos = line.indexOf(key);
-  if (pos < 0) return false;
+// ============================================================================
+// Connection State Helpers
+// ============================================================================
 
-  pos += key.length();
-  if (pos < (int)line.length() && line[pos] == '=') pos++;
-
-  int end = line.indexOf(' ', pos);
-  if (end < 0) end = line.length();
-
-  String val = line.substring(pos, end);
-  val.trim();
-  if (val.length() == 0) return false;
-
-  // Strip surrounding quotes if present
-  if (val.length() >= 2 && val[0] == '\"' && val[val.length() - 1] == '\"') {
-    val = val.substring(1, val.length() - 1);
-  }
-
-  // rgb()/rgba()
-  if (val.startsWith("rgb(") || val.startsWith("rgba(")) {
-    String c = val;
-    c.replace("rgba(", "");
-    c.replace("rgb(", "");
-    c.replace(")", "");
-    c.replace(" ", "");
-    int p1 = c.indexOf(',');
-    int p2 = c.indexOf(',', p1+1);
-    if (p1 < 0 || p2 < 0) return false;
-    int p3 = c.indexOf(',', p2+1);  // may or may not exist (alpha)
-
-    r = c.substring(0, p1).toInt();
-    g = c.substring(p1+1, p2).toInt();
-    if (p3 >= 0) {
-      b = c.substring(p2+1, p3).toInt();
-    } else {
-      b = c.substring(p2+1).toInt();
-    }
-    return true;
-  }
-
-  // Hex form: #RRGGBB
-  if (val[0] == '#') {
-    if (val.length() < 7) return false;
-    String rs = val.substring(1, 3);
-    String gs = val.substring(3, 5);
-    String bs = val.substring(5, 7);
-    r = (int) strtol(rs.c_str(), nullptr, 16);
-    g = (int) strtol(gs.c_str(), nullptr, 16);
-    b = (int) strtol(bs.c_str(), nullptr, 16);
-    return true;
-  }
-
-  // Decimal CSV form: R,G,B
-  int c1 = val.indexOf(',');
-  int c2 = val.indexOf(',', c1 + 1);
-  if (c1 < 0 || c2 < 0) return false;
-
-  r = val.substring(0, c1).toInt();
-  g = val.substring(c1 + 1, c2).toInt();
-  b = val.substring(c2 + 1).toInt();
-  return true;
+String getShortDeviceID() {
+  return "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
 }
 
-// ------------------------------------------------------------
-// Font helpers for TEXT mode (all full ASCII)
-// ------------------------------------------------------------
-void setExtraBigFont() {
-  // Extra big for ≤2 chars
-  M5.Display.setFont(&fonts::Font8);
-  M5.Display.setTextSize(1);   // really chunky
-}
-
-void setUltraFont() {
-  // Ultra-large for 3 chars
-  M5.Display.setFont(&fonts::Font4);
-  M5.Display.setTextSize(2);
-}
-
-void setLargeFont() {
-  // Large for 4–6 chars
-  M5.Display.setFont(&fonts::Font4);
-  M5.Display.setTextSize(2);
-}
-
-void setNormalFont() {
-  // Normal font for multi-line
-  M5.Display.setFont(&fonts::Font4);
-  M5.Display.setTextSize(1);
-}
-
-// ------------------------------------------------------------
-// Word-wrap into up to MAX_AUTO_LINES lines
-// (font must already be set before calling)
-// ------------------------------------------------------------
-bool wrapToLines(const String& src, String& l1, String& l2, String& l3, int& outLines) {
-  l1 = "";
-  l2 = "";
-  l3 = "";
-  outLines = 0;
-
-  if (src.length() == 0) return true;
-
-  M5.Display.setTextWrap(false);
-
-  int screenW = M5.Display.width();
-
-  // Split into words
-  std::vector<String> words;
-  int start = 0;
-  while (start < (int)src.length()) {
-    int space = src.indexOf(' ', start);
-    if (space < 0) space = src.length();
-    String w = src.substring(start, space);
-    if (w.length() > 0) words.push_back(w);
-    start = space + 1;
-  }
-
-  String linesBuf[MAX_AUTO_LINES];
-  String* lines[MAX_AUTO_LINES];
-  for (int i = 0; i < MAX_AUTO_LINES; i++) {
-    linesBuf[i] = "";
-    lines[i] = &linesBuf[i];
-  }
-
-  int currentLine = 0;
-
-  for (size_t i = 0; i < words.size(); i++) {
-    if (currentLine >= MAX_AUTO_LINES) {
-      return false;
-    }
-
-    String candidate;
-    if (lines[currentLine]->length() == 0) {
-      candidate = words[i];
-    } else {
-      candidate = *lines[currentLine] + " " + words[i];
-    }
-
-    int w = M5.Display.textWidth(candidate);
-
-    if (w <= screenW) {
-      *lines[currentLine] = candidate;
-    } else {
-      currentLine++;
-      if (currentLine >= MAX_AUTO_LINES) {
-        return false;
-      }
-      *lines[currentLine] = words[i];
-    }
-  }
-
-  outLines = currentLine + 1;
-
-  if (outLines >= 1) l1 = linesBuf[0];
-  if (outLines >= 2) l2 = linesBuf[1];
-  if (outLines >= 3) l3 = linesBuf[2];
-
-  return true;
-}
-
-// ------------------------------------------------------------
-// Draw yellow border when button is pressed in TEXT mode
-// ------------------------------------------------------------
-void drawTextPressedBorderIfNeeded() {
-  if (!textPressedBorder) return;
-
-  int w = M5.Display.width();
-  int h = M5.Display.height();
-  uint16_t borderColor = M5.Display.color565(255, 255, 0); // yellow
-
-  // 4px thick border using nested rectangles
-  for (int i = 0; i < 4; i++) {
-    M5.Display.drawRect(i, i, w - i * 2, h - i * 2, borderColor);
-  }
-}
-
-// ------------------------------------------------------------
-// Decide layout based on currentText (no scrolling)
-// ------------------------------------------------------------
-void analyseLayout() {
-  line1 = "";
-  line2 = "";
-  line3 = "";
-  numLines = 0;
-  useManualLines = false;
-  manualLines.clear();
-
-  int len = currentText.length();
-  if (len == 0) return;
-
-  // -------------- Manual \n lines --------------
-  if (currentText.indexOf('\n') >= 0) {
-    setNormalFont();
-    M5.Display.setTextWrap(false);
-
-    int start = 0;
-    while (true) {
-      int idx = currentText.indexOf('\n', start);
-      if (idx < 0) {
-        manualLines.push_back(currentText.substring(start));
-        break;
-      }
-      manualLines.push_back(currentText.substring(start, idx));
-      start = idx + 1;
-    }
-
-    // Limit to 5 visible lines
-    if ((int)manualLines.size() > 5) {
-      manualLines.resize(5);
-    }
-
-    useManualLines = true;
-    return;
-  }
-
-  // -------------- Extra-big / Ultra / Large single-line modes --------------
-  if (len <= 2) {
-    setExtraBigFont();
-    numLines = 1;
-    line1    = currentText;
-    return;
-  }
-
-  if (len == 3) {
-    setUltraFont();
-    numLines = 1;
-    line1    = currentText;
-    return;
-  }
-
-  if (len <= 6) {
-    setLargeFont();
-    numLines = 1;
-    line1    = currentText;
-    return;
-  }
-
-  // -------------- Normal text: auto wrap, no scrolling fallback ----------
-  setNormalFont();
-  M5.Display.setTextWrap(false);
-
-  String w1, w2, w3;
-  int    lines = 0;
-  bool   fits  = wrapToLines(currentText, w1, w2, w3, lines);
-
-  if (fits && lines > 0 && lines <= MAX_AUTO_LINES) {
-    numLines  = lines;
-    line1     = w1;
-    line2     = (lines >= 2) ? w2 : "";
-    line3     = (lines >= 3) ? w3 : "";
-    return;
-  }
-
-  // If wrapping somehow fails, just show it as a single line with normal font
-  numLines = 1;
-  line1    = currentText;
-}
-
-// ------------------------------------------------------------
-// Repaint display based on text layout state (no scrolling)
-// ------------------------------------------------------------
-void refreshTextDisplay() {
-  M5.Display.fillScreen(bgColor);
-  M5.Display.setTextColor(txtColor, bgColor);
-  M5.Display.setTextWrap(false);
-
-  if (currentText.length() == 0) {
-    // Still draw border if requested (e.g. pressed but no text)
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
-
-  int screenW = M5.Display.width();
-  int screenH = M5.Display.height();
-
-  // Manual multi-line mode using \n (up to X lines)
-  if (useManualLines) {
-    setNormalFont();
-    M5.Display.setTextDatum(middle_center);
-
-    int lineHeight  = M5.Display.fontHeight();
-    int lines       = manualLines.size();
-    int totalHeight = lineHeight * lines;
-    int topY        = (screenH - totalHeight) / 2 + (lineHeight / 2);
-
-    for (int i = 0; i < lines; i++) {
-      int y = topY + i * lineHeight;
-      M5.Display.drawString(manualLines[i], screenW / 2, y);
-    }
-
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
-
-  M5.Display.setTextDatum(middle_center);
-
-  int len = currentText.length();
-
-  // Extra-big single-line (≤2 chars)
-  if (len <= 2) {
-    setExtraBigFont();
-    M5.Display.drawString(currentText, screenW / 2, screenH / 2);
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
-
-  // Ultra-large single-line (3 chars)
-  if (len == 3) {
-    setUltraFont();
-    M5.Display.drawString(currentText, screenW / 2, screenH / 2);
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
-
-  // Large single-line (4–6 chars)
-  if (len <= 6) {
-    setLargeFont();
-    M5.Display.drawString(currentText, screenW / 2, screenH / 2);
-    drawTextPressedBorderIfNeeded();
-    return;
-  }
-
-  // Static multi-line centered mode (auto-wrap)
-  if (numLines >= 1 && numLines <= MAX_AUTO_LINES) {
-    setNormalFont();
-    String lines[3] = { line1, line2, line3 };  // we only stored first 3
-
-    int lineHeight  = M5.Display.fontHeight();
-    int totalHeight = lineHeight * numLines;
-    int topY        = (screenH - totalHeight) / 2 + (lineHeight / 2);
-
-    for (int i = 0; i < numLines && i < 3; i++) {
-      int y = topY + i * lineHeight;
-      M5.Display.drawString(lines[i], screenW / 2, y);
-    }
-  }
-
-  // Finally, overlay yellow border if button is pressed
-  drawTextPressedBorderIfNeeded();
-}
-
-// ------------------------------------------------------------
-// Update text and redraw immediately
-// ------------------------------------------------------------
-void setTextNow(const String& txt) {
-  currentText = txt;
-  analyseLayout();
-  refreshTextDisplay();
-}
-
-void setText(const String& txt) {
-  setTextNow(txt);
-}
-
-// ------------------------------------------------------------
-// Handle TEXT= in KEY-STATE for TEXT mode
-// ------------------------------------------------------------
-void handleKeyStateTextField(const String& line) {
-  int tPos = line.indexOf("TEXT=");
-  if (tPos < 0) return;
-
-  int firstQuote = line.indexOf('\"', tPos);
-  if (firstQuote < 0) return;
-
-  int secondQuote = line.indexOf('\"', firstQuote + 1);
-  if (secondQuote < 0) return;
-
-  String textField = line.substring(firstQuote + 1, secondQuote);
-  String decoded   = decodeCompanionText(textField);
-  decoded.replace("\\n", "\n");
-
-  Serial.print("[API] TEXT encoded=\"");
-  Serial.print(textField);
-  Serial.print("\" decoded=\"");
-  Serial.print(decoded);
-  Serial.println("\"");
-
-  setText(decoded);
-}
-
-// ------------------------------------------------------------
-// Handle COLOR/TEXTCOLOR for TEXT mode
-// ------------------------------------------------------------
-void handleTextModeColors(const String& line) {
-  int r, g, b;
-  bool bgOk  = false;
-  bool txtOk = false;
-
-  if (parseColorToken(line, "COLOR", r, g, b)) {
-    bgColor = M5.Display.color565(r, g, b);
-    bgOk = true;
-    Serial.printf("[API] TEXT BG COLOR r=%d g=%d b=%d\n", r, g, b);
-  }
-
-  if (parseColorToken(line, "TEXTCOLOR", r, g, b)) {
-    txtColor = M5.Display.color565(r, g, b);
-    txtOk = true;
-    Serial.printf("[API] TEXT FG COLOR r=%d g=%d b=%d\n", r, g, b);
-  }
-
-  if (bgOk || txtOk) {
-    refreshTextDisplay();
-  }
-}
-
-// ------------------------------------------------------------
-// Companion / Satellite API
-// ------------------------------------------------------------
-void sendAddDevice() {
-  String cmd;
-  String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5); // Use last 5 chars like LEDMatrixClock
-
-  if (displayMode == DISPLAY_TEXT) {
-    // TEXT-ONLY mode: no bitmaps, just TEXT + COLORS
-    cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
-          " PRODUCT_NAME=\"M5 AtomS3 (TEXT)\" "
-          "KEYS_TOTAL=1 KEYS_PER_ROW=1 "
-          "COLORS=rgb TEXT=true BITMAPS=0";
-  } else {
-    // BITMAP mode: bitmaps enabled, no TEXT
-    cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
-          " PRODUCT_NAME=\"M5 AtomS3 (BITMAP)\" "
-          "KEYS_TOTAL=1 KEYS_PER_ROW=1 "
-          "COLORS=rgb TEXT=false BITMAPS=72";
-  }
-
-  client.println(cmd);
-  Serial.println("[API] Sent: " + cmd);
-}
-
-// Handle KEY-STATE for both modes
-void handleKeyState(const String& line) {
-  Serial.println("[API] KEY-STATE line: " + line);
-
-  // -------- COLOR=rgba(...) for LED (shared by both modes) --------
-  int colorPos = line.indexOf("COLOR=");
-  if (colorPos >= 0) {
-    int start = colorPos + 6;
-    int end = line.indexOf(' ', start);
-    if (end < 0) end = line.length();
-    String c = line.substring(start, end);
-    c.trim();
-
-    Serial.println("[API] COLOR raw: " + c);
-
-    if (c.startsWith("\"") && c.endsWith("\""))
-      c = c.substring(1, c.length() - 1);
-
-    if (c.startsWith("rgba(") || c.startsWith("rgb(")) {
-      String s = c;
-      s.replace("rgba(", "");
-      s.replace("rgb(", "");
-      s.replace(")", "");
-      s.replace(" ", "");
-      int p1 = s.indexOf(',');
-      int p2 = s.indexOf(',', p1+1);
-      int p3 = s.indexOf(',', p2+1);
-      int r = s.substring(0, p1).toInt();
-      int g = s.substring(p1+1, p2).toInt();
-      int b;
-      if (p3 >= 0) {
-        b = s.substring(p2+1, p3).toInt();
-      } else {
-        b = s.substring(p2+1).toInt();
-      }
-
-      Serial.print("[API] Parsed LED COLOR r/g/b = ");
-      Serial.print(r); Serial.print("/");
-      Serial.print(g); Serial.print("/");
-      Serial.println(b);
-
-      setExternalLedColor(r, g, b);
-    } else {
-      Serial.println("[API] COLOR is not rgba()/rgb(), ignoring for LED.");
-    }
-  } else {
-    Serial.println("[API] No COLOR= field in KEY-STATE for LED.");
-  }
-
-  // -------- Display handling by mode --------
-  if (displayMode == DISPLAY_BITMAP) {
-    // BITMAP mode – ignore TEXT, focus on BITMAP=
-    int bmpPos = line.indexOf("BITMAP=");
-    if (bmpPos >= 0) {
-      int start = bmpPos + 7;
-      int end = line.indexOf(' ', start);
-      if (end < 0) end = line.length();
-      String bmp = line.substring(start, end);
-      bmp.trim();
-
-      if (bmp.startsWith("\"") && bmp.endsWith("\""))
-        bmp = bmp.substring(1, bmp.length() - 1);
-
-      int inLen = bmp.length();
-      if (inLen <= 0) {
-        Serial.println("[API] BITMAP present but empty.");
-        return;
-      }
-
-      Serial.println("[API] BITMAP base64 length: " + String(inLen));
-
-      size_t out_max = (inLen * 3) / 4 + 4;
-      std::unique_ptr<uint8_t[]> buf(new uint8_t[out_max]);
-      size_t out_len = 0;
-
-      int res = mbedtls_base64_decode(buf.get(), out_max, &out_len,
-                                      (const unsigned char*)bmp.c_str(), inLen);
-      if (res != 0) {
-        Serial.println("[API] Base64 decode failed, res=" + String(res) + " out_len=" + String(out_len));
-        return;
-      }
-
-      Serial.println("[API] Decoded BITMAP bytes: " + String(out_len));
-
-      int sizeRGB  = sqrt(out_len / 3);
-      int sizeRGBA = sqrt(out_len / 4);
-
-      bool isRGB  = (sizeRGB  * sizeRGB  * 3 == (int)out_len);
-      bool isRGBA = (sizeRGBA * sizeRGBA * 4 == (int)out_len);
-
-      if (isRGB) {
-        Serial.println("[API] BITMAP detected as RGB, size=" + String(sizeRGB));
-        drawBitmapRGB888FullScreen(buf.get(), sizeRGB);
-      } else if (isRGBA) {
-        Serial.println("[API] BITMAP detected as RGBA, size=" + String(sizeRGBA));
-        int pixels = sizeRGBA * sizeRGBA;
-        std::unique_ptr<uint8_t[]> rgb(new uint8_t[pixels * 3]);
-        uint8_t* s = buf.get();
-        uint8_t* d = rgb.get();
-        for (int i = 0; i < pixels; i++) {
-          d[0] = s[0];
-          d[1] = s[1];
-          d[2] = s[2];
-          s += 4;
-          d += 3;
-        }
-        drawBitmapRGB888FullScreen(rgb.get(), sizeRGBA);
-      } else {
-        Serial.println("[API] BITMAP size mismatch, cannot infer square dimensions.");
-      }
-    }
-  } else {
-    // TEXT mode – ignore BITMAP, use TEXT + COLOR/TEXTCOLOR
-    handleTextModeColors(line);
-    handleKeyStateTextField(line);
-  }
-}
-
-// ------------------------------------------------------------
-// Parse all Companion API messages
-// ------------------------------------------------------------
-void parseAPI(const String& apiData) {
-  if (apiData.length() == 0) return;
-  if (apiData.startsWith("PONG"))   return;
-
-  Serial.println("[API] RX: " + apiData);
-
-  if (apiData.startsWith("PING")) {
-    String payload = apiData.substring(apiData.indexOf(' ') + 1);
-    client.println("PONG " + payload);
-    return;
-  }
-
-  if (apiData.startsWith("BRIGHTNESS")) {
-    int valPos = apiData.indexOf("VALUE=");
-    if (valPos >= 0) {
-      String v = apiData.substring(valPos + 6);
-      v.trim();
-      brightness = v.toInt();
-      Serial.println("[API] BRIGHTNESS set to " + String(brightness));
-      setExternalLedColor(lastColorR, lastColorG, lastColorB);
-      applyDisplayBrightness();
-    }
-    return;
-  }
-
-  if (apiData.startsWith("KEYS-CLEAR")) {
-    Serial.println("[API] KEYS-CLEAR received");
-    setExternalLedColor(0,0,0);
+void hideReconnectIndicator() {
+  if (showingReconnectIndicator) {
+    showingReconnectIndicator = false;
     if (displayMode == DISPLAY_TEXT) {
-      setText("");
-    } else {
-      clearScreen(BLACK);
+      refreshTextDisplay();  // Redraw to remove overlay
     }
+    // BITMAP mode: next KEY-STATE will overwrite overlay naturally
+  }
+}
+
+void resetConnectionHealth() {
+  lastMessageTime = millis();
+  lastContentUpdateTime = millis();  // Reset inactivity timer
+  unansweredPingCount = 0;
+  firstDisconnectTime = 0;  // Reset reconnect backoff on successful connection
+}
+
+unsigned long getBackoffInterval(unsigned long sinceTime) {
+  // Unified progressive backoff: 1s → 5s after 1min → 15s after 15min
+  if (sinceTime == 0) return 1000;
+
+  unsigned long elapsed = millis() - sinceTime;
+
+  if (elapsed > 900000) return 15000;  // 15+ minutes
+  if (elapsed > 300000)  return 5000;  // 5+ minute
+  return 1000;                         // < 1 minute
+}
+
+// ============================================================================
+// Bitmap Processing
+// ============================================================================
+
+void processPendingBitmap(const String& bitmapBase64) {
+  // Move existing decode logic from Network.ino here
+  int inLen = bitmapBase64.length();
+  if (inLen <= 0) return;
+
+  size_t out_max = (inLen * 3) / 4 + 4;
+  std::unique_ptr<uint8_t[]> buf(new uint8_t[out_max]);
+  size_t out_len = 0;
+
+  int res = mbedtls_base64_decode(buf.get(), out_max, &out_len,
+                                  (const unsigned char*)bitmapBase64.c_str(), inLen);
+  if (res != 0) {
+    Serial.println("[RENDER] Base64 decode failed");
     return;
   }
 
-  if (apiData.startsWith("KEY-STATE")) {
-    handleKeyState(apiData);
-    return;
-  }
-}
+  int sizeRGB  = sqrt(out_len / 3);
+  int sizeRGBA = sqrt(out_len / 4);
+  bool isRGB   = (sizeRGB  * sizeRGB  * 3 == (int)out_len);
+  bool isRGBA  = (sizeRGBA * sizeRGBA * 4 == (int)out_len);
 
-// ------------------------------------------------------------
-// REST API Handlers for Companion Configuration
-// ------------------------------------------------------------
-void handleGetHost() {
-  Serial.println("[REST] GET /api/host request received");
-  Serial.println("[REST] Current companion_host: '" + String(companion_host) + "'");
-  restServer.send(200, "text/plain", companion_host);
-  Serial.println("[REST] GET /api/host: " + String(companion_host));
-}
-
-void handleGetPort() {
-  Serial.println("[REST] GET /api/port request received");
-  Serial.println("[REST] Current companion_port: '" + String(companion_port) + "'");
-  restServer.send(200, "text/plain", companion_port);
-  Serial.println("[REST] GET /api/port: " + String(companion_port));
-}
-
-void handleGetConfig() {
-  String json = "{\"host\":\"" + String(companion_host) + "\",\"port\":" + String(companion_port) + "}";
-  Serial.println("[REST] GET /api/config request received");
-  Serial.println("[REST] Response JSON: " + json);
-  restServer.send(200, "application/json", json);
-  Serial.println("[REST] GET /api/config: " + json);
-}
-
-void handlePostHost() {
-  String newHost = "";
-  
-  Serial.println("[REST] POST /api/host request received");
-  
-  if (restServer.hasArg("plain")) {
-    String body = restServer.arg("plain");
-    body.trim();
-    Serial.println("[REST] Request body: '" + body + "'");
-    
-    // Check if it's JSON format
-    if (body.startsWith("{") && body.endsWith("}")) {
-      Serial.println("[REST] Parsing JSON format");
-      
-      int hostPos = body.indexOf("\"host\":");
-      if (hostPos >= 0) {
-        int startQuote = body.indexOf("\"", hostPos + 7);
-        int endQuote = body.indexOf("\"", startQuote + 1);
-        if (startQuote >= 0 && endQuote > startQuote) {
-          newHost = body.substring(startQuote + 1, endQuote);
-          Serial.println("[REST] Extracted host from JSON: '" + newHost + "'");
-        }
-      }
-    } else {
-      // Plain text format
-      newHost = body;
-      Serial.println("[REST] Using plain text format: '" + newHost + "'");
+  if (isRGB) {
+    drawBitmapRGB888FullScreen(buf.get(), sizeRGB);
+  } else if (isRGBA) {
+    // Strip alpha channel
+    int pixels = sizeRGBA * sizeRGBA;
+    std::unique_ptr<uint8_t[]> rgb(new uint8_t[pixels * 3]);
+    uint8_t* s = buf.get();
+    uint8_t* d = rgb.get();
+    for (int i = 0; i < pixels; i++) {
+      d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+      s += 4; d += 3;
     }
-  }
-  
-  newHost.trim();
-  
-  if (newHost.length() > 0 && newHost.length() < sizeof(companion_host)) {
-    strncpy(companion_host, newHost.c_str(), sizeof(companion_host));
-    companion_host[sizeof(companion_host) - 1] = '\0';
-    
-    // Save to preferences
-    preferences.begin("companion", false);
-    preferences.putString("companionip", String(companion_host));
-    preferences.end();
-    
-    restServer.send(200, "text/plain", "OK");
-    Serial.println("[REST] POST /api/host: Updated to " + String(companion_host));
-    
-    // Reestablish connection
-    if (client.connected()) {
-      client.stop();
-    }
-  } else {
-    restServer.send(400, "text/plain", "Invalid host");
-    Serial.println("[REST] POST /api/host: Invalid host - " + newHost);
+    drawBitmapRGB888FullScreen(rgb.get(), sizeRGBA);
   }
 }
 
-void handlePostPort() {
-  String newPort = "";
-  
-  Serial.println("[REST] POST /api/port request received");
-  
-  if (restServer.hasArg("plain")) {
-    String body = restServer.arg("plain");
-    body.trim();
-    Serial.println("[REST] Request body: '" + body + "'");
-    
-    // Try quoted port first
-    int startQuote = body.indexOf("\"");
-    int endQuote = body.indexOf("\"", startQuote + 1);
-    if (startQuote >= 0 && endQuote > startQuote) {
-      newPort = body.substring(startQuote + 1, endQuote);
-      Serial.println("[REST] Extracted quoted port from JSON: '" + newPort + "'");
-    } else {
-      // Plain text format
-      newPort = body;
-      Serial.println("[REST] Using plain text format: '" + newPort + "'");
-    }
-  }
-  
-  newPort.trim();
-  
-  // Validate port number
-  int portNum = newPort.toInt();
-  if (portNum > 0 && portNum <= 65535) {
-    strncpy(companion_port, newPort.c_str(), sizeof(companion_port));
-    companion_port[sizeof(companion_port) - 1] = '\0';
-    
-    // Save to preferences
-    preferences.begin("companion", false);
-    preferences.putString("companionport", String(companion_port));
-    preferences.end();
-    
-    restServer.send(200, "text/plain", "OK");
-    Serial.println("[REST] POST /api/port: Updated to " + String(companion_port));
-    
-    // Reestablish connection
-    if (client.connected()) {
-      client.stop();
-    }
-  } else {
-    restServer.send(400, "text/plain", "Invalid port number");
-    Serial.println("[REST] POST /api/port: Invalid port - " + newPort);
-  }
-}
-
-void handlePostConfig() {
-  String newHost = "";
-  String newPort = "";
-  
-  Serial.println("[REST] POST /api/config request received");
-  
-  if (restServer.hasArg("plain")) {
-    String body = restServer.arg("plain");
-    body.trim();
-    Serial.println("[REST] Request body: '" + body + "'");
-    
-    if (body.startsWith("{") && body.endsWith("}")) {
-      Serial.println("[REST] Parsing JSON format");
-      
-      // Parse host
-      int hostPos = body.indexOf("\"host\":");
-      if (hostPos >= 0) {
-        int startQuote = body.indexOf("\"", hostPos + 7);
-        int endQuote = body.indexOf("\"", startQuote + 1);
-        if (startQuote >= 0 && endQuote > startQuote) {
-          newHost = body.substring(startQuote + 1, endQuote);
-          Serial.println("[REST] Extracted host from JSON: '" + newHost + "'");
-        }
-      }
-      
-      // Parse port
-      int portPos = body.indexOf("\"port\":");
-      if (portPos >= 0) {
-        // Try quoted port first
-        int startQuote = body.indexOf("\"", portPos + 7);
-        int endQuote = body.indexOf("\"", startQuote + 1);
-        if (startQuote >= 0 && endQuote > startQuote) {
-          newPort = body.substring(startQuote + 1, endQuote);
-          Serial.println("[REST] Extracted quoted port from JSON: '" + newPort + "'");
-        } else {
-          // Try unquoted port number
-          int startNum = portPos + 7;
-          // Skip whitespace and colon
-          while (startNum < body.length() && (body.charAt(startNum) == ' ' || body.charAt(startNum) == ':')) {
-            startNum++;
-          }
-          // Find end by looking for comma or closing brace
-          int endNumComma = body.indexOf(",", startNum);
-          int endNumBrace = body.indexOf("}", startNum);
-          int endNum = -1;
-          
-          // Use the closest delimiter
-          if (endNumComma >= 0 && endNumBrace >= 0) {
-            endNum = (endNumComma < endNumBrace) ? endNumComma : endNumBrace;
-          } else if (endNumComma >= 0) {
-            endNum = endNumComma;
-          } else if (endNumBrace >= 0) {
-            endNum = endNumBrace;
-          }
-          
-          if (endNum >= 0) {
-            newPort = body.substring(startNum, endNum);
-            newPort.trim();
-            Serial.println("[REST] Extracted unquoted port from JSON: '" + newPort + "'");
-          }
-        }
-      }
-    } else {
-      // Plain text format - split by comma
-      int commaPos = body.indexOf(',');
-      if (commaPos >= 0) {
-        newHost = body.substring(0, commaPos);
-        newPort = body.substring(commaPos + 1);
-        newHost.trim();
-        newPort.trim();
-      }
-    }
-  }
-  
-  newHost.trim();
-  newPort.trim();
-  
-  // Validate
-  bool hostValid = (newHost.length() > 0 && newHost.length() < sizeof(companion_host));
-  int portNum = newPort.toInt();
-  bool portValid = (portNum > 0 && portNum <= 65535);
-  
-  if (hostValid && portValid) {
-    strncpy(companion_host, newHost.c_str(), sizeof(companion_host));
-    companion_host[sizeof(companion_host) - 1] = '\0';
-    strncpy(companion_port, newPort.c_str(), sizeof(companion_port));
-    companion_port[sizeof(companion_port) - 1] = '\0';
-    
-    // Save to preferences
-    preferences.begin("companion", false);
-    preferences.putString("companionip", String(companion_host));
-    preferences.putString("companionport", String(companion_port));
-    preferences.end();
-    
-    restServer.send(200, "text/plain", "OK");
-    Serial.println("[REST] POST /api/config: Updated host=" + String(companion_host) + " port=" + String(companion_port));
-    
-    // Reestablish connection
-    if (client.connected()) {
-      client.stop();
-    }
-  } else {
-    restServer.send(400, "text/plain", "Invalid config");
-    Serial.println("[REST] POST /api/config: Invalid config");
-  }
-}
-
-void setupRestServer() {
-  restServer.on("/api/host", HTTP_GET, handleGetHost);
-  restServer.on("/api/port", HTTP_GET, handleGetPort);
-  restServer.on("/api/config", HTTP_GET, handleGetConfig);
-  
-  restServer.on("/api/host", HTTP_POST, handlePostHost);
-  restServer.on("/api/port", HTTP_POST, handlePostPort);
-  restServer.on("/api/config", HTTP_POST, handlePostConfig);
-  
-  restServer.begin();
-  Serial.println("[REST] REST API server started on port 9999");
-  Serial.println("[REST] Available endpoints:");
-  Serial.println("[REST]   GET  /api/host");
-  Serial.println("[REST]   GET  /api/port");
-  Serial.println("[REST]   GET  /api/config");
-  Serial.println("[REST]   POST /api/host");
-  Serial.println("[REST]   POST /api/port");
-  Serial.println("[REST]   POST /api/config");
-}
-
-// ------------------------------------------------------------
-// WiFi + Config Portal
-// ------------------------------------------------------------
-void connectToNetwork() {
-  if (stationIP != IPAddress(0,0,0,0))
-    wifiManager.setSTAStaticIPConfig(stationIP, stationGW, stationMask);
-
-  WiFi.mode(WIFI_STA);
-
-  // Build default displayMode string
-  char modeBuf[8];
-  if (displayMode == DISPLAY_TEXT) {
-    snprintf(modeBuf, sizeof(modeBuf), "text");
-  } else {
-    snprintf(modeBuf, sizeof(modeBuf), "bitmap");
-  }
-
-  // Build default rotation string based on current screenRotation (0..3)
-  char rotBuf[5];
-  int rotDeg = 0;
-  if      (screenRotation == 1) rotDeg = 90;
-  else if (screenRotation == 2) rotDeg = 180;
-  else if (screenRotation == 3) rotDeg = 270;
-  else                          rotDeg = 0;
-  snprintf(rotBuf, sizeof(rotBuf), "%d", rotDeg);
-    
-  custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", companion_host, 40);
-  custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", companion_port, 6);
-  custom_displayMode   = new WiFiManagerParameter("displayMode", "Display Mode (bitmap/text)", modeBuf, 8);
-  custom_rotation      = new WiFiManagerParameter("rotation", "Text Rotation (0/90/180/270)", rotBuf, 4);
-
-  wifiManager.addParameter(custom_companionIP);
-  wifiManager.addParameter(custom_companionPort);
-  wifiManager.addParameter(custom_displayMode);
-  wifiManager.addParameter(custom_rotation);
-  wifiManager.setSaveParamsCallback(saveParamCallback);
-
-  std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
-  wifiManager.setMenu(menu);
-  wifiManager.setClass("invert");
-  wifiManager.setConfigPortalTimeout(180); // 3 minutes auto portal if WiFi fails
-
-  // Set hostname in WiFiManager to prevent ESP32 default override
-  String wifiHostname = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
-  wifiManager.setHostname(wifiHostname.c_str());
-  Serial.printf("[WiFi] WiFiManager hostname set to: %s\n", wifiHostname.c_str());
-
-  wifiManager.setAPCallback([](WiFiManager* wm) {
-    Serial.println("[WiFi] Config portal started");
-    configPortalActive = true;
-  });
-
-  // Normal autoConnect behaviour (connect to WiFi, or start portal if no WiFi)
-  // WiFi connect animation
-  drawCenterText("Connecting...", WHITE, BLACK);
-  delay(300);
-  drawCenterText("Connecting..", WHITE, BLACK);
-  delay(300);
-  drawCenterText("Connecting.", WHITE, BLACK);
-  delay(300);
-
-  // Use shortened device ID for WiFi portal name (underscore format)
-  String shortDeviceID = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);  // Use last 5 chars like LEDMatrixClock
-  bool res = wifiManager.autoConnect(shortDeviceID.c_str(), AP_password);
-  Serial.printf("[WiFi] AutoConnect - SSID: %s\n", shortDeviceID.c_str());
-
-  if (!res) {
-    Serial.println("[WiFi] Failed to connect, starting config portal...");
-    drawCenterText("WiFi ERR", RED, BLACK);
-    // WiFiManager will automatically start config portal on failure
-    // No need to restart - let WiFiManager handle it
-  } else {
-    Serial.println("[WiFi] Connected to AP, IP=" + WiFi.localIP().toString());
-    drawCenterText("WiFi OK", GREEN, BLACK);
-    delay(500);
-    configPortalActive = false; // Reset flag when WiFi connects
-    
-    // Verify and reset hostname after connection to ensure it persists
-    String currentHostname = WiFi.getHostname();
-    String expectedHostname = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
-    if (currentHostname != expectedHostname) {
-      Serial.printf("[WiFi] Hostname mismatch, resetting from '%s' to '%s'\n", currentHostname.c_str(), expectedHostname.c_str());
-      WiFi.setHostname(expectedHostname.c_str());
-      delay(100);
-      Serial.printf("[WiFi] Hostname reset to: %s\n", WiFi.getHostname());
-    } else {
-      Serial.printf("[WiFi] Hostname confirmed: %s\n", currentHostname.c_str());
-    }
-  }
-
-  // Update globals from the latest config values
-  preferences.begin("companion", true);
-  if (preferences.getString("companionip").length() > 0)
-    preferences.getString("companionip").toCharArray(companion_host, sizeof(companion_host));
-
-  if (preferences.getString("companionport").length() > 0)
-    preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
-
-  String modeStr = preferences.getString("displayMode", custom_displayMode->getValue());
-  String rotStr  = preferences.getString("rotation",   custom_rotation->getValue());
-  preferences.end();
-
-  // Display mode (bitmap / text)
-  if (modeStr.equalsIgnoreCase("text")) {
-    displayMode = DISPLAY_TEXT;
-  } else {
-    displayMode = DISPLAY_BITMAP;
-  }
-
-  // Map rotation degrees -> M5 rotation index (0..3)
-  if (rotStr.toInt() == 90)  screenRotation = 1;
-  else if (rotStr.toInt() == 180) screenRotation = 2;
-  else if (rotStr.toInt() == 270) screenRotation = 3;
-  else                    screenRotation = 0;
-
-  // Only apply rotation in TEXT mode; BITMAP stays at 0
-  if (displayMode == DISPLAY_TEXT) {
-    M5.Display.setRotation(screenRotation);
-  } else {
-    M5.Display.setRotation(0);
-  }
-
-  Serial.print("[Config] Display mode set to: ");
-  Serial.println(displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP");
-  Serial.print("[Config] Text rotation degrees: ");
-  Serial.println(rotDeg);
-  Serial.print("[Config] Text rotation index: ");
-  Serial.println(screenRotation);
-}
-
-// ------------------------------------------------------------
-// SETUP
-// ------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   Serial.println("\n[M5AtomS3] Booting...");
 
-  // Build deviceID from MAC every boot
+  // Build deviceID from MAC
   WiFi.mode(WIFI_STA);
   delay(100);
 
@@ -1402,106 +333,12 @@ void setup() {
 
   Serial.println("[ID] deviceID = " + deviceID);
 
-  // Boot counter logic for config portal trigger - check immediately after deviceID creation
-  bootCountCached = eepromReadBootCounter();
-  Serial.printf("[Boot] Boot counter read: %u\n", bootCountCached);
-  
-  if (bootCountCached == 1) {
-    // Boot counter 1 → trigger config portal (user reset during boot animations)
-    Serial.println("[Boot] Boot counter 1 → triggering config portal");
-    eepromWriteBootCounter(0);  // Reset immediately
-    bootCountCached = 0;
-    
-    // Initialize display before showing config portal
-    auto cfg = M5.config();
-    M5.begin(cfg);
-    M5.Display.setFont(&fonts::Font0);
-    M5.Display.setTextSize(1);
-    applyDisplayBrightness();
-    clearScreen(BLACK);
-    
-    // Set flag before display check so it will show the message
-    showConfigPortalMessage = true;
-    Serial.println("[Boot] Setting showConfigPortalMessage flag to true");
-    
-    // Show config portal message if flag is set
-    if (showConfigPortalMessage) {
-      Serial.println("[Display] Showing config portal message - flag is set");
-      
-      // Add small delay to ensure display is fully initialized
-      delay(100);
-      
-      String msg =
-        "CONFIG PORTAL\n\n"
-        "Connect to WiFi:\n" +
-        String("m5atom-s3_") + deviceID.substring(deviceID.length() - 5) +
-        "\nThen go to:\n"
-        "192.168.4.1";
-      Serial.println("[Display] Message: " + msg);
-      drawCenterText(msg, WHITE, BLACK);
-      Serial.println("[Display] drawCenterText called");
-      
-      // Add another delay to ensure the display updates
-      delay(100);
-    } else {
-      Serial.println("[Display] Config portal message flag not set");
-    }
-    
-    startConfigPortal();
-    // startConfigPortal() will handle setup icons
-    return;  // Skip normal boot sequence
-  } else {
-    // Boot counter 0 (or any other value) → normal boot
-    Serial.println("[Boot] Boot counter 0 → normal boot");
-    // Set boot counter to 1 during boot animations so user can reset to trigger portal
-    eepromWriteBootCounter(1);
-  }
+  loadPreferences();
 
-  // Load preferences
-  preferences.begin("companion", false);
-  preferences.putString("deviceid", deviceID);
-
-  if (preferences.getString("companionip").length() > 0)
-    preferences.getString("companionip").toCharArray(companion_host, sizeof(companion_host));
-
-  if (preferences.getString("companionport").length() > 0)
-    preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
-
-  String modeStr = preferences.getString("displayMode", "bitmap");
-  String rotStr  = preferences.getString("rotation",   "0");   // default rotation 0°
-
-  if (modeStr.equalsIgnoreCase("text")) {
-    displayMode = DISPLAY_TEXT;
-  } else {
-    displayMode = DISPLAY_BITMAP;
-  }
-
-  // Map saved degrees -> rotation index (0..3)
-  int rotDeg = rotStr.toInt();
-  if      (rotDeg == 90)  screenRotation = 1;
-  else if (rotDeg == 180) screenRotation = 2;
-  else if (rotDeg == 270) screenRotation = 3;
-  else                    screenRotation = 0;
-
-  preferences.end();
-
-  Serial.print("[Prefs] Companion IP: ");
-  Serial.println(companion_host);
-  Serial.print("[Prefs] Companion Port: ");
-  Serial.println(companion_port);
-  Serial.print("[Prefs] Display Mode: ");
-  Serial.println(displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP");
-  Serial.print("[Prefs] Text rotation degrees: ");
-  Serial.println(rotDeg);
-  Serial.print("[Prefs] Text rotation index: ");
-  Serial.println(screenRotation);
-
+  // Initialize M5
   auto cfg = M5.config();
   M5.begin(cfg);
 
-  // Apply initial rotation:
-  //   - TEXT mode   -> use screenRotation
-  //   - BITMAP mode -> fixed at 0 (no rotation)
   if (displayMode == DISPLAY_TEXT) {
     M5.Display.setRotation(screenRotation);
   } else {
@@ -1513,47 +350,14 @@ void setup() {
   applyDisplayBrightness();
   clearScreen(BLACK);
 
-  String bootMsg =
-    "BOOTING\n\n"
-    "M5AtomS3\n"
-    "Companion v4\n"
-    "Single Button\n"
-    "Satellite\n(" +
-    String(displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " MODE)";
+  // Boot menu if button held
+  if (M5.BtnA.isPressed())
+    runBootMenu();
 
-  drawCenterText(bootMsg, WHITE, BLACK);
+  drawCenterText("Booting...\n\n\nHold button\non boot\nfor MENU", WHITE, BLACK);
 
-  // ---- External LED Setup ----
-  pinMode(LED_PIN_GND, OUTPUT);
-  digitalWrite(LED_PIN_GND, LOW);
+  setupLED();
 
-  Serial.println("[LED] Initialising PWM pins with ledcAttach...");
-  if (ledcAttach(LED_PIN_RED,   pwmFreq, pwmResolution)) {
-    Serial.println("[LED] PWM attached to RED pin");
-  } else {
-    Serial.println("[LED] ERROR attaching PWM to RED pin");
-  }
-  if (ledcAttach(LED_PIN_GREEN, pwmFreq, pwmResolution)) {
-    Serial.println("[LED] PWM attached to GREEN pin");
-  } else {
-    Serial.println("[LED] ERROR attaching PWM to GREEN pin");
-  }
-  if (ledcAttach(LED_PIN_BLUE,  pwmFreq, pwmResolution)) {
-    Serial.println("[LED] PWM attached to BLUE pin");
-  } else {
-    Serial.println("[LED] ERROR attaching PWM to BLUE pin");
-  }
-
-  setExternalLedColor(0,0,0);
-
-  // Quick LED colour test
-  Serial.println("[LED] Running power-on colour test (R/G/B)...");
-  setExternalLedColor(255, 0, 0);  delay(300);
-  setExternalLedColor(0, 255, 0);  delay(300);
-  setExternalLedColor(0, 0, 255);  delay(300);
-  setExternalLedColor(0,0,0);
-
-  // WiFi connect (with icons)
   WiFi.setHostname(deviceID.c_str());
   connectToNetwork();
 
@@ -1561,150 +365,163 @@ void setup() {
   ArduinoOTA.setPassword("companion-satellite");
   ArduinoOTA.begin();
 
-  // Start REST API server after WiFi is connected
   setupRestServer();
+  initializeMDNS();
 
-  // Initialize mDNS service after WiFi is connected
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("[mDNS] Starting mDNS service...");
-    
-    // Extract short MAC for hostname (first 5 chars like LEDMatrixClock)
-    String macShort = deviceID.substring(deviceID.length() - 5); // Use last 5 chars like LEDMatrixClock
-    String mDNSHostname = "m5atom-s3_" + macShort;
-    String mDNSInstanceName = "m5atom-s3:" + macShort;
-    
-    if (!MDNS.begin(mDNSHostname.c_str())) {
-      Serial.println("[mDNS] ERROR: mDNS failed to start!");
-    } else {
-      Serial.printf("[mDNS] mDNS started with hostname: %s\n", mDNSHostname.c_str());
-      MDNS.setInstanceName(mDNSInstanceName);
-      
-      // Add companion-satellite service
-      if (MDNS.addService("companion-satellite", "tcp", 9999)) {
-        Serial.println("[mDNS] companion-satellite service registered on port 9999");
-        
-        // Add service text records
-        MDNS.addServiceTxt("companion-satellite", "tcp", "restEnabled", "true");
-        MDNS.addServiceTxt("companion-satellite", "tcp", "deviceId", macShort);
-        MDNS.addServiceTxt("companion-satellite", "tcp", "prefix", "m5atom-s3");
-        MDNS.addServiceTxt("companion-satellite", "tcp", "productName", "M5 AtomS3");
-        MDNS.addServiceTxt("companion-satellite", "tcp", "apiVersion", "4");
-        
-        Serial.println("[mDNS] Service text records added");
-        Serial.printf("[mDNS] Instance name: %s\n", mDNSInstanceName.c_str());
-        Serial.println("[mDNS] Test with: dns-sd -B companion-satellite._tcp");
-        Serial.println("[mDNS] SUCCESS: Full companion-satellite service name working!");
-      } else {
-        Serial.println("[mDNS] ERROR: companion-satellite service registration failed!");
-      }
-    }
-  }
+  // Initialize connection state (boot screen shows "Ready", main loop will connect)
+  lastMessageTime = millis();
+  connectionState = CONN_CONNECTED;
+  hasConnectedOnce = false;
 
   clearScreen(BLACK);
+  setExternalLedColor(0, 0, 0);
+
   String waitMsg =
-    "Waiting For\n"
-    "Companion\n"
-    "on\n" +
-    String(companion_host) + "\n" + String(companion_port) +
-    "\n(" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " MODE)";
+    "Waiting for\nCompanion\n\n" +
+    String(companion_host.data()) + ":" + String(companion_port.data()) +
+    "\n\n" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " mode";
 
   drawCenterText(waitMsg, WHITE, BLACK);
-  
-  // Successful boot completed - set boot counter to 0
-  eepromWriteBootCounter(0);
-  Serial.println("[Boot] Successful boot completed - boot counter reset to 0");
-  
+
   Serial.println("[System] Setup complete, entering main loop.");
 }
 
-// ------------------------------------------------------------
-// LOOP
-// ------------------------------------------------------------
 void loop() {
   M5.update();
   ArduinoOTA.handle();
   restServer.handleClient();
 
-  // Handle config portal display update
-  if (configPortalActive) {
-    static bool messageShown = false;
-    
-    if (!messageShown) {
-      // Config portal message
-      String msg =
-        "CONFIG PORTAL\n\n"
-        "Connect to WiFi:\n" +
-        String("m5atom-s3_") + deviceID.substring(deviceID.length() - 5) +
-        "\nThen go to:\n"
-        "192.168.4.1";
-
-      drawCenterText(msg, WHITE, BLACK);
-      messageShown = true;
-    }
-  } else {
-    // Reset flag when portal is not active
-    static bool messageShown = false;
-    messageShown = false;
-  }
-
   unsigned long now = millis();
 
-  // Companion connection / reconnect
-  if (!client.connected() && (now - lastConnectTry >= connectRetryMs)) {
-    lastConnectTry = now;
-    Serial.print("[NET] Connecting to Companion ");
-    Serial.print(companion_host);
-    Serial.print(":");
-    Serial.println(companion_port);
+  // ============================================================================
+  // Connection Health & Reconnection
+  // ============================================================================
 
-    if (client.connect(companion_host, atoi(companion_port))) {
-      Serial.println("[NET] Connected to Companion API");
-      drawCenterText("Connected", GREEN, BLACK);
-      delay(200);
+  bool tcpConnected = client.connected();
+  bool tooManyUnansweredPings = hasConnectedOnce && (unansweredPingCount >= maxUnansweredPings);
+  bool isHealthy = tcpConnected && !tooManyUnansweredPings;
+
+  // State transitions based on health
+  if (!isHealthy && connectionState == CONN_CONNECTED) {
+    // Connection degraded
+    connectionState = CONN_DISCONNECTED;
+    firstDisconnectTime = millis();  // Start backoff timer
+    Serial.printf("[CONN] Unhealthy (TCP:%d Pings:%d) - disconnecting\n", tcpConnected, unansweredPingCount);
+  }
+  else if (isHealthy && connectionState == CONN_DISCONNECTED) {
+    // Connection recovered
+    connectionState = CONN_CONNECTED;
+    Serial.println("[CONN] Healthy - reconnected");
+    hideReconnectIndicator();
+    sendAddDevice();
+  }
+
+  // Attempt reconnection with progressive backoff
+  unsigned long reconnectInterval = getBackoffInterval(firstDisconnectTime);
+  if (!tcpConnected && (now - lastConnectTry >= reconnectInterval)) {
+    connectionState = CONN_RECONNECTING;
+    lastConnectTry = now;
+
+    Serial.printf("[NET] Reconnecting (backoff: %lus)\n", reconnectInterval / 1000);
+
+    if (client.connect(companion_host.data(), atoi(companion_port.data()))) {
+      Serial.println("[NET] Connected successfully");
+      connectionState = CONN_CONNECTED;
+      resetConnectionHealth();
+      hideReconnectIndicator();
       sendAddDevice();
       lastPingTime = millis();
     } else {
-      Serial.println("[NET] Companion connect failed");
+      Serial.println("[NET] Connection failed");
+      connectionState = CONN_DISCONNECTED;
     }
   }
 
-  // Handle Companion traffic
+  // ============================================================================
+  // Visual Feedback (only after first successful connection)
+  // ============================================================================
+
+  if ((connectionState == CONN_DISCONNECTED || connectionState == CONN_RECONNECTING) && hasConnectedOnce) {
+    if (!showingReconnectIndicator) {
+      drawReconnectingOverlay();
+      showingReconnectIndicator = true;
+    }
+    updateReconnectingLED();
+  }
+
+  // ============================================================================
+  // Companion Communication (when connected)
+  // ============================================================================
+
   if (client.connected()) {
+    // Receive and parse incoming messages
     while (client.available()) {
       String line = client.readStringUntil('\n');
       line.trim();
       if (line.length() > 0) parseAPI(line);
     }
 
-    // Short press -> KEY-PRESS true/false
-    if (M5.BtnA.wasPressed()) {
-      Serial.println("[BTN] Short press -> KEY=0 PRESSED=true");
-      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);
-      client.println("KEY-PRESS DEVICEID=" + companionDeviceID + " KEY=0 PRESSED=true");
+    // Process display update queue
+    if (!isRenderingNow && !updateQueue.isEmpty()) {
+      isRenderingNow = true;
+      unsigned long renderStart = millis();
 
-      // Show yellow border while pressed in TEXT mode
+      PendingUpdate update = updateQueue.pop();
+
+      // Apply LED color
+      if (update.hasColor) {
+        setExternalLedColor(update.colorR, update.colorG, update.colorB);
+      }
+
+      // Render based on mode
+      if (displayMode == DISPLAY_BITMAP) {
+        if (update.bitmapBase64.length() > 0) {
+          processPendingBitmap(update.bitmapBase64);
+        }
+      } else {
+        // TEXT mode
+        if (update.hasBgColor) {
+          bgColor = M5.Display.color565(update.bgR, update.bgG, update.bgB);
+        }
+        if (update.hasFgColor) {
+          txtColor = M5.Display.color565(update.fgR, update.fgG, update.fgB);
+        }
+        // Update text with font size override if provided
+        int fontOverride = (update.hasFontSize && update.fontSize > 0) ? update.fontSize : 0;
+        setText(update.textContent, fontOverride);
+      }
+
+      isRenderingNow = false;
+
+      lastRenderDuration = millis() - renderStart;
+      Serial.printf("[RENDER] Complete in %lu ms (queue size: %d)\n", lastRenderDuration, updateQueue.count);
+    }
+
+    // Handle button events
+    if (M5.BtnA.wasPressed()) {
+      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);  // Keep colon format
+      client.println("KEY-PRESS DEVICEID=" + companionDeviceID + " KEY=0 PRESSED=true");
       if (displayMode == DISPLAY_TEXT) {
         textPressedBorder = true;
-        refreshTextDisplay();  // redraw text + border
+        refreshTextDisplay();
       }
     }
 
     if (M5.BtnA.wasReleased()) {
-      Serial.println("[BTN] Release -> KEY=0 PRESSED=false");
-      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);
+      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);  // Keep colon format
       client.println("KEY-PRESS DEVICEID=" + companionDeviceID + " KEY=0 PRESSED=false");
-
-      // Remove border when released in TEXT mode
       if (displayMode == DISPLAY_TEXT) {
         textPressedBorder = false;
-        refreshTextDisplay();  // redraw text without border
+        refreshTextDisplay();
       }
     }
 
-    // Periodic PING
-    if (now - lastPingTime >= pingIntervalMs) {
+    // Send keepalive ping with adaptive backoff (clamped to 4s max for Companion's 5s timeout)
+    unsigned long pingInterval = min(getBackoffInterval(lastContentUpdateTime), 4000UL);
+    if (now - lastPingTime >= pingInterval) {
       client.println("PING atoms3");
       lastPingTime = now;
+      unansweredPingCount++;
     }
   }
 
