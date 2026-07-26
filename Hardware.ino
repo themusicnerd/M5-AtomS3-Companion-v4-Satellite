@@ -9,13 +9,31 @@
 // LED Initialization
 // ============================================================================
 
+bool attachLedPwm(uint8_t pin, uint8_t channel) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  return ledcAttach(pin, pwmFreq, pwmResolution);
+#else
+  ledcSetup(channel, pwmFreq, pwmResolution);
+  ledcAttachPin(pin, channel);
+  return true;
+#endif
+}
+
+void writeLedPwm(uint8_t pin, uint8_t channel, uint8_t value) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(pin, value);
+#else
+  ledcWrite(channel, value);
+#endif
+}
+
 void setupLED() {
   pinMode(LED_PIN_GND, OUTPUT);
   digitalWrite(LED_PIN_GND, LOW);
 
-  ledcAttach(LED_PIN_RED, pwmFreq, pwmResolution);
-  ledcAttach(LED_PIN_GREEN, pwmFreq, pwmResolution);
-  ledcAttach(LED_PIN_BLUE, pwmFreq, pwmResolution);
+  attachLedPwm(LED_PIN_RED, 0);
+  attachLedPwm(LED_PIN_GREEN, 1);
+  attachLedPwm(LED_PIN_BLUE, 2);
 
   setExternalLedColor(0, 0, 0);
   setExternalLedColor(255, 255, 255);  // Power-on test
@@ -37,9 +55,9 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
 
   // For common anode LED, invert: scaledX = 255 - scaledX
 
-  ledcWrite(LED_PIN_RED,   scaledR);
-  ledcWrite(LED_PIN_GREEN, scaledG);
-  ledcWrite(LED_PIN_BLUE,  scaledB);
+  writeLedPwm(LED_PIN_RED, 0, scaledR);
+  writeLedPwm(LED_PIN_GREEN, 1, scaledG);
+  writeLedPwm(LED_PIN_BLUE, 2, scaledB);
 }
 
 // ============================================================================
