@@ -19,18 +19,25 @@
 
 #include <M5Unified.h>
 #include <M5GFX.h>
+#ifdef ATOMIC_POE_BUILD
+#include <SPI.h>
+#include <M5_Ethernet.h>
+#include <esp_mac.h>
+#include "PoeWebServer.h"
+#else
 #include <WiFi.h>
 #include <WiFiManager.h>
-#include <Preferences.h>
 #include <ArduinoOTA.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#endif
+#include <Preferences.h>
 #include <Update.h>
 #include <memory>
 #include <mbedtls/base64.h>
 #include <vector>
 #include <math.h>
 #include <esp32-hal-ledc.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
 
 // ============================================================================
 // Display Mode Constants
@@ -143,9 +150,14 @@ void processPendingBitmap(const String& bitmapBase64);
 // ============================================================================
 
 Preferences preferences;
+#ifdef ATOMIC_POE_BUILD
+EthernetClient client;
+PoeWebServer restServer(9999);
+#else
 WiFiManager wifiManager;
 WiFiClient  client;
 WebServer   restServer(9999);
+#endif
 
 // Companion server
 std::array<char, 40> companion_host = {""};
@@ -185,11 +197,13 @@ uint8_t lastColorB = 0;
 
 int displayMode = DISPLAY_BITMAP;
 
+#ifndef ATOMIC_POE_BUILD
 WiFiManagerParameter* custom_companionIP = nullptr;
 WiFiManagerParameter* custom_companionPort = nullptr;
 WiFiManagerParameter* custom_displayMode = nullptr;
 WiFiManagerParameter* custom_rotation = nullptr;
 WiFiManagerParameter* custom_mdnsEnabled = nullptr;
+#endif
 
 int screenRotation = 0;  // 0=0°, 1=90°, 2=180°, 3=270° (TEXT mode only)
 bool mdnsEnabled = true;
@@ -324,12 +338,16 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\n[M5AtomS3] Booting...");
 
-  // Build deviceID from MAC
+  // Build deviceID from the ESP32 factory MAC.
+#ifndef ATOMIC_POE_BUILD
   WiFi.mode(WIFI_STA);
   delay(100);
-
   uint8_t mac[6];
   WiFi.macAddress(mac);
+#else
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+#endif
 
   char macBuf[13];
   sprintf(macBuf, "%02X%02X%02X%02X%02X%02X",
@@ -366,12 +384,16 @@ void setup() {
 
   setupLED();
 
+#ifndef ATOMIC_POE_BUILD
   WiFi.setHostname(deviceID.c_str());
+#endif
   connectToNetwork();
 
+#ifndef ATOMIC_POE_BUILD
   ArduinoOTA.setHostname(deviceID.c_str());
   ArduinoOTA.setPassword("companion-satellite");
   ArduinoOTA.begin();
+#endif
 
   setupRestServer();
   initializeMDNS();
@@ -396,7 +418,11 @@ void setup() {
 
 void loop() {
   M5.update();
+#ifndef ATOMIC_POE_BUILD
   ArduinoOTA.handle();
+#else
+  Ethernet.maintain();
+#endif
   restServer.handleClient();
 
   unsigned long now = millis();

@@ -28,6 +28,10 @@ void writeLedPwm(uint8_t pin, uint8_t channel, uint8_t value) {
 }
 
 void setupLED() {
+#ifdef ATOMIC_POE_BUILD
+  // G5/G6/G7/G8 are the Atomic PoE W5500 SPI bus.
+  Serial.println("[LED] Disabled in Atomic PoE build");
+#else
   pinMode(LED_PIN_GND, OUTPUT);
   digitalWrite(LED_PIN_GND, LOW);
 
@@ -37,6 +41,7 @@ void setupLED() {
 
   setExternalLedColor(0, 0, 0);
   setExternalLedColor(255, 255, 255);  // Power-on test
+#endif
 }
 
 // ============================================================================
@@ -48,16 +53,13 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
   lastColorG = g;
   lastColorB = b;
 
-  // Scale by brightness (min 15% to keep LED visible)
-  uint8_t scaledR = r * max(brightness, 15) / 100;
-  uint8_t scaledG = g * max(brightness, 15) / 100;
-  uint8_t scaledB = b * max(brightness, 15) / 100;
-
   // For common anode LED, invert: scaledX = 255 - scaledX
 
-  writeLedPwm(LED_PIN_RED, 0, scaledR);
-  writeLedPwm(LED_PIN_GREEN, 1, scaledG);
-  writeLedPwm(LED_PIN_BLUE, 2, scaledB);
+#ifndef ATOMIC_POE_BUILD
+  writeLedPwm(LED_PIN_RED, 0, r);
+  writeLedPwm(LED_PIN_GREEN, 1, g);
+  writeLedPwm(LED_PIN_BLUE, 2, b);
+#endif
 }
 
 // ============================================================================
@@ -65,6 +67,9 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
 // ============================================================================
 
 void updateReconnectingLED() {
+#ifdef ATOMIC_POE_BUILD
+  return;
+#else
   unsigned long now = millis();
 
   if (now - lastBlinkTime >= blinkIntervalMs) {
@@ -77,4 +82,5 @@ void updateReconnectingLED() {
       setExternalLedColor(0, 0, 0);    // OFF
     }
   }
+#endif
 }

@@ -196,6 +196,49 @@ void handleGetConfig() {
   Serial.println("[REST] GET /api/config: " + json);
 }
 
+// Device-specific settings are intentionally separate from /api/config: that
+// endpoint is owned by Companion's Satellite discovery and only carries host
+// and port.  A Companion module (or another REST client) can use this endpoint
+// without interfering with the one-click surface setup flow.
+String jsonSetting(const String& body, const char* name) {
+  const String key = String("\"") + name + "\"";
+  int pos = body.indexOf(key);
+  if (pos < 0) return "";
+  pos = body.indexOf(':', pos + key.length());
+  if (pos < 0) return "";
+  pos++;
+  while (pos < body.length() && isspace(body[pos])) pos++;
+  if (pos < body.length() && body[pos] == '\"') {
+    const int end = body.indexOf('\"', ++pos);
+    return end < 0 ? "" : body.substring(pos, end);
+  }
+  int end = pos;
+  while (end < body.length() && body[end] != ',' && body[end] != '}') end++;
+  String value = body.substring(pos, end); value.trim(); return value;
+}
+
+void handleGetSettings() {
+  const String mode = displayMode == DISPLAY_TEXT ? "text" : "bitmap";
+  const String json = "{\"displayMode\":\"" + mode + "\",\"rotation\":" + String(screenRotation * 90) + ",\"brightness\":" + String(brightness) + "}";
+  restServer.send(200, "application/json", json);
+}
+
+void handlePostSettings() {
+  const String body = restServer.arg("plain");
+  const String mode = jsonSetting(body, "displayMode");
+  const String rotation = jsonSetting(body, "rotation");
+  const String brightnessValue = jsonSetting(body, "brightness");
+  if (mode.length() && !mode.equalsIgnoreCase("text") && !mode.equalsIgnoreCase("bitmap")) { restServer.send(400, "text/plain", "Invalid displayMode"); return; }
+  if (rotation.length() && !(rotation == "0" || rotation == "90" || rotation == "180" || rotation == "270")) { restServer.send(400, "text/plain", "Invalid rotation"); return; }
+  if (brightnessValue.length() && (brightnessValue.toInt() < 0 || brightnessValue.toInt() > 100)) { restServer.send(400, "text/plain", "Invalid brightness"); return; }
+  if (mode.length()) displayMode = mode.equalsIgnoreCase("text") ? DISPLAY_TEXT : DISPLAY_BITMAP;
+  if (rotation.length()) screenRotation = degreesToRotationIndex(rotation.toInt());
+  if (brightnessValue.length()) { brightness = brightnessValue.toInt(); applyDisplayBrightness(); }
+  saveDisplaySettings();
+  M5.Display.setRotation(displayMode == DISPLAY_TEXT ? screenRotation : 0);
+  restServer.send(200, "application/json", "{\"ok\":true}");
+}
+
 void handlePostHost() {
   String newHost = "";
 
@@ -393,10 +436,11 @@ void handleFirmwareUpdatePage() {
 
 void handleFirmwareUpload() {
   if (firmwareUpdatePassword.length() && !restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword.c_str())) return;
-  HTTPUpload& upload = restServer.upload();
+  auto& upload = restServer.upload();
   if (upload.status == UPLOAD_FILE_START) Update.begin(UPDATE_SIZE_UNKNOWN);
   else if (upload.status == UPLOAD_FILE_WRITE) Update.write(upload.buf, upload.currentSize);
   else if (upload.status == UPLOAD_FILE_END) Update.end(true);
+  else if (upload.status == UPLOAD_FILE_ABORTED) Update.abort();
 }
 
 void handleFirmwareUpdateResult() {
@@ -413,14 +457,42 @@ void handleFirmwareUpdatePassword() {
   restServer.send(200, "text/plain", firmwareUpdatePassword.length() ? "Update password saved." : "Update password removed.");
 }
 
+void handleConfigPage() {
+  const String mode = displayMode == DISPLAY_TEXT ? "text" : "bitmap";
+  const String html =
+    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>M5 AtomS3 setup</title><h2>M5 AtomS3 setup</h2><p>Network: "
+#ifdef ATOMIC_POE_BUILD
+    "Atomic PoE / W5500"
+#else
+    "Wi-Fi"
+#endif
+    "</p><label>Companion host <input id=h value='" + String(companion_host.data()) +
+    "'></label><br><label>Port <input id=p value='" + String(companion_port.data()) +
+    "'></label><br><label>Display <select id=m><option>bitmap</option><option" +
+    String(mode == "text" ? " selected" : "") + ">text</option></select></label><br>"
+    "<label>Rotation <select id=r><option>0</option><option>90</option><option>180</option>"
+    "<option>270</option></select></label><br><button onclick=s()>Save</button> "
+    "<a href=/update>Firmware update</a><pre id=o></pre><script>r.value='" +
+    String(screenRotation * 90) + "';async function s(){let a=await fetch('/api/config',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h.value,port:+p.value})});"
+    "let b=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({displayMode:m.value,rotation:+r.value})});o.textContent=(await a.text())+' '+"
+    "(await b.text())}</script>";
+  restServer.send(200, "text/html", html);
+}
+
 void setupRestServer() {
+  restServer.on("/", HTTP_GET, handleConfigPage);
   restServer.on("/api/host", HTTP_GET, handleGetHost);
   restServer.on("/api/port", HTTP_GET, handleGetPort);
   restServer.on("/api/config", HTTP_GET, handleGetConfig);
+  restServer.on("/api/settings", HTTP_GET, handleGetSettings);
 
   restServer.on("/api/host", HTTP_POST, handlePostHost);
   restServer.on("/api/port", HTTP_POST, handlePostPort);
   restServer.on("/api/config", HTTP_POST, handlePostConfig);
+  restServer.on("/api/settings", HTTP_POST, handlePostSettings);
   restServer.on("/update", HTTP_GET, handleFirmwareUpdatePage);
   restServer.on("/update", HTTP_POST, handleFirmwareUpdateResult, handleFirmwareUpload);
   restServer.on("/update/password", HTTP_POST, handleFirmwareUpdatePassword);
@@ -441,6 +513,7 @@ void setupRestServer() {
 // ============================================================================
 
 // Run non-blocking AP config portal with QR code display
+#ifndef ATOMIC_POE_BUILD
 void runAPConfigPortal(const String& wifiHostname) {
   Serial.println("[WiFi] Starting config portal (AP mode)");
 
@@ -474,7 +547,6 @@ void runAPConfigPortal(const String& wifiHostname) {
     delay(10);
   }
 }
-
 void connectToNetwork() {
   if (stationIP != IPAddress(0,0,0,0))
     wifiManager.setSTAStaticIPConfig(stationIP, stationGW, stationMask);
@@ -588,12 +660,38 @@ void connectToNetwork() {
     M5.Display.setRotation(0);
   }
 }
+#else
+void runAPConfigPortal(const String&) {}
+
+void connectToNetwork() {
+  uint8_t ethernetMac[6];
+  esp_read_mac(ethernetMac, ESP_MAC_WIFI_STA);
+  Serial.println("[Ethernet] Initialising Atomic PoE W5500");
+  drawCenterText("Ethernet\nDHCP...", WHITE, BLACK);
+  SPI.begin(5, 7, 8, -1);
+  Ethernet.init(6);
+  while (Ethernet.begin(ethernetMac, 15000, 4000) == 0) {
+    Serial.println("[Ethernet] DHCP failed; retrying");
+    drawCenterText("Ethernet\nDHCP failed\nRetrying...", RED, BLACK);
+    delay(5000);
+  }
+  Serial.println("[Ethernet] DHCP address: " + Ethernet.localIP().toString());
+  drawCenterText("Ethernet ready\n\n" + Ethernet.localIP().toString() +
+                 "\n\nSetup:\nhttp://" + Ethernet.localIP().toString() + ":9999", GREEN, BLACK);
+  delay(1500);
+  M5.Display.setRotation(displayMode == DISPLAY_TEXT ? screenRotation : 0);
+}
+#endif
 
 // ============================================================================
 // mDNS Service Discovery
 // ============================================================================
 
 void initializeMDNS() {
+#ifdef ATOMIC_POE_BUILD
+  Serial.println("[mDNS] W5500 build: use the displayed DHCP address and wired setup page");
+  return;
+#else
   if (!mdnsEnabled) {
     Serial.println("[mDNS] Discovery disabled in configuration");
     return;
@@ -630,4 +728,5 @@ void initializeMDNS() {
       }
     }
   }
+#endif
 }
