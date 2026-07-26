@@ -32,6 +32,15 @@ AU: https://www.jaycar.com.au/tricolour-rgb-5mm-led-600-1000mcd-round-diffused/
 USA: https://www.adafruit.com/product/302
 
 Installation & Usage
+Initial install with ESPHome Web (recommended)
+1. Download `M5-AtomS3-Companion-v4-Satellite.ino.bin` from the latest GitHub release.
+2. Connect the AtomS3 with a USB **data** cable and open [ESPHome Web](https://web.esphome.io/).
+3. Select **Connect**, choose the serial device, then choose **Install** and select the downloaded `.bin`.
+4. Configure Wi-Fi and Companion after boot. Future updates use the built-in `http://<device-ip>:9999/update` page—no USB cable required.
+
+ESPHome Web is only a browser serial flasher in this workflow; it does not install ESPHome firmware.
+
+Arduino development environment
 1. Clone this repository.
 2. Open M5-AtomS3-Companion-v4-Satellite.ino in Arduino IDE.
 3. Arduino will automatically load all .ino tabs (Hardware, Display, Network, Config).
