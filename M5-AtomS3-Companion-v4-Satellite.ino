@@ -23,6 +23,7 @@
 #include <WiFiManager.h>
 #include <Preferences.h>
 #include <ArduinoOTA.h>
+#include <Update.h>
 #include <memory>
 #include <mbedtls/base64.h>
 #include <vector>

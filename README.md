@@ -57,6 +57,8 @@ Boot Menu
   - Rotation: 0°/90°/180°/270° — Adjust text rotation (TEXT mode only, saves immediately)
 
 OTA Firmware Update
+- **Web update:** browse to `http://<device-ip>:9999/update`, sign in as `admin` with password `companion-satellite`, choose the release application `.bin`, then wait for the automatic reboot. Do not remove power during the upload.
+- Use only `M5-AtomS3-Companion-v4-Satellite.ino.bin` from a GitHub release; do not upload bootloader or partition files.
 - OTA enabled by default.
 - Hostname = m5atom-s3_XXXXX (matches deviceID)
 - Password = companion-satellite
