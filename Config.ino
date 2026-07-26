@@ -55,17 +55,31 @@ void buildRotationHTML(char* buffer, size_t bufferSize, int currentRotation) {
   );
 }
 
+void buildMDNSHTML(char* buffer, size_t bufferSize, bool enabled) {
+  snprintf(buffer, bufferSize,
+    "<br/><label for='mdnsEnabled'>mDNS Discovery</label>"
+    "<select name='mdnsEnabled' id='mdnsEnabled'>"
+    "<option value='enabled'%s>Enabled</option>"
+    "<option value='disabled'%s>Disabled</option>"
+    "</select>",
+    enabled ? " selected" : "",
+    enabled ? "" : " selected"
+  );
+}
+
 void saveParamCallback() {
   String str_companionIP   = getParam("companionIP");
   String str_companionPort = getParam("companionPort");
   String str_displayMode   = getParam("displayMode");
   String str_rotation      = getParam("rotation");
+  String str_mdnsEnabled   = getParam("mdnsEnabled");
 
   preferences.begin("companion", false);
   if (str_companionIP.length() > 0)    preferences.putString("companionip",   str_companionIP);
   if (str_companionPort.length() > 0)  preferences.putString("companionport", str_companionPort);
   if (str_displayMode.length() > 0)    preferences.putString("displayMode",   str_displayMode);
   if (str_rotation.length() > 0)       preferences.putString("rotation",      str_rotation);
+  if (str_mdnsEnabled.length() > 0)    preferences.putBool("mdnsEnabled", str_mdnsEnabled == "enabled");
   preferences.end();
 }
 
@@ -92,6 +106,7 @@ void loadPreferences() {
 
   String modeStr = preferences.getString("displayMode", "bitmap");
   String rotStr  = preferences.getString("rotation",   "0");
+  mdnsEnabled = preferences.getBool("mdnsEnabled", true);
 
   if (modeStr.equalsIgnoreCase("text")) {
     displayMode = DISPLAY_TEXT;
@@ -114,6 +129,8 @@ void loadPreferences() {
   Serial.println(rotDeg);
   Serial.print("[Prefs] Text rotation index: ");
   Serial.println(screenRotation);
+  Serial.print("[Prefs] mDNS discovery: ");
+  Serial.println(mdnsEnabled ? "enabled" : "disabled");
 }
 
 void saveDisplaySettings() {

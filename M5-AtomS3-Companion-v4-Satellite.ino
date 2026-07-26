@@ -131,6 +131,7 @@ void saveParamCallback();
 void runBootMenu();
 void buildDisplayModeHTML(char* buffer, size_t bufferSize, int currentMode);
 void buildRotationHTML(char* buffer, size_t bufferSize, int currentRotation);
+void buildMDNSHTML(char* buffer, size_t bufferSize, bool enabled);
 
 // Update handling
 void enqueueUpdate(const PendingUpdate& update);
@@ -187,13 +188,16 @@ WiFiManagerParameter* custom_companionIP = nullptr;
 WiFiManagerParameter* custom_companionPort = nullptr;
 WiFiManagerParameter* custom_displayMode = nullptr;
 WiFiManagerParameter* custom_rotation = nullptr;
+WiFiManagerParameter* custom_mdnsEnabled = nullptr;
 
 int screenRotation = 0;  // 0=0°, 1=90°, 2=180°, 3=270° (TEXT mode only)
+bool mdnsEnabled = true;
 
 // Text mode state
 bool textPressedBorder = false;
 
 String currentText  = "";
+int currentFontSizeOverride = 0;
 const int MAX_AUTO_LINES = 7;
 
 std::vector<String> manualLines;
@@ -247,7 +251,10 @@ void hideReconnectIndicator() {
   if (showingReconnectIndicator) {
     showingReconnectIndicator = false;
     if (displayMode == DISPLAY_TEXT) {
-      refreshTextDisplay();  // Redraw to remove overlay
+      // The reconnect overlay uses the small system font. Rebuild the saved
+      // layout first so the previous text font and scale are restored.
+      analyseLayout(currentFontSizeOverride);
+      refreshTextDisplay();
     }
     // BITMAP mode: next KEY-STATE will overwrite overlay naturally
   }

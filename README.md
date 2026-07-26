@@ -13,10 +13,10 @@ Features
 - External RGB LED output on G8/G5/G6 (G7 = Ground), mirrors key colour
 - Interactive boot menu — Hold button during boot to configure settings
 - QR code display for easy WiFi setup and web portal access
-- mDNS service discovery (companion-satellite._tcp) for automatic device discovery
+- Optional mDNS service discovery (companion-satellite._tcp) for automatic device discovery
 - OTA updates via ArduinoOTA
 - Auto deviceID: m5atom-s3_XXXXX (last 5 MAC chars)
-- Supports Companion v4 Satellite API: TEXT, BITMAP, COLOR, TEXTCOLOR, BRIGHTNESS, KEY-STATE, PING
+- Supports the Companion Satellite API used by Companion v4: TEXT, BITMAP, COLOR, TEXTCOLOR, BRIGHTNESS, KEY-STATE, PING
 - Clean, stable, production-ready codebase
 - M5Burner-ready binaries available
 
@@ -40,9 +40,9 @@ Installation & Usage
 6. Flash to the AtomS3.
 7. On first boot, device will create a WiFi access point (SSID = m5atom-s3_XXXXX).
 8. Device displays QR code for easy WiFi connection (press button to toggle details).
-9. Scan QR code or connect manually to the AP, then configure WiFi credentials, Companion IP/Port, and display mode at 192.168.4.1.
+9. Scan QR code or connect manually to the AP, then configure WiFi credentials, Companion IP/Port, display mode, and mDNS discovery at 192.168.4.1.
 10. Device will connect to WiFi and show "Ready" screen.
-11. In Companion v4: Device is automatically discovered via mDNS and can be added via the companion interface, or boot into Web Config mode to manually change companion settings.
+11. In Companion v4: Device is automatically discovered via mDNS when enabled, or can be configured manually with the Companion IP and port. Boot into Web Config mode to change either setting.
 12. Press button to send KEY-PRESS to Companion. LED mirrors key color.
 
 Boot Menu
@@ -89,6 +89,10 @@ v1.4
   - draws to screen in chunks instead of pixel by pixel, significantly improving render time
 - Improved text-mode rendering to mimick companion text
 - Added "Reconnecting..." overlay when connection is lost
+
+Unreleased
+- Added a persisted mDNS enable/disable setting in the web configuration portal
+- Fixed text mode using the tiny reconnect-overlay font after a connection recovers
 
 v1.3
 - Text-only mode with zero bitmap requests

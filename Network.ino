@@ -436,18 +436,22 @@ void connectToNetwork() {
 
   char displayModeHTML[512];
   char rotationHTML[768];
+  char mdnsHTML[512];
   buildDisplayModeHTML(displayModeHTML, sizeof(displayModeHTML), displayMode);
   buildRotationHTML(rotationHTML, sizeof(rotationHTML), screenRotation);
+  buildMDNSHTML(mdnsHTML, sizeof(mdnsHTML), mdnsEnabled);
 
   custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", companion_host.data(), companion_host.size());
   custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", companion_port.data(), companion_port.size());
   custom_displayMode   = new WiFiManagerParameter(displayModeHTML);
   custom_rotation      = new WiFiManagerParameter(rotationHTML);
+  custom_mdnsEnabled   = new WiFiManagerParameter(mdnsHTML);
 
   wifiManager.addParameter(custom_companionIP);
   wifiManager.addParameter(custom_companionPort);
   wifiManager.addParameter(custom_displayMode);
   wifiManager.addParameter(custom_rotation);
+  wifiManager.addParameter(custom_mdnsEnabled);
   wifiManager.setSaveParamsCallback(saveParamCallback);
 
   std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
@@ -542,6 +546,11 @@ void connectToNetwork() {
 // ============================================================================
 
 void initializeMDNS() {
+  if (!mdnsEnabled) {
+    Serial.println("[mDNS] Discovery disabled in configuration");
+    return;
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("[mDNS] Starting mDNS service...");
 

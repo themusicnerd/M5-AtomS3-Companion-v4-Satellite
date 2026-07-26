@@ -488,6 +488,7 @@ void refreshTextDisplay() {
 
 void setText(const String& txt, int fontSizeOverride) {
   currentText = txt;
+  currentFontSizeOverride = fontSizeOverride;
   analyseLayout(fontSizeOverride);
   refreshTextDisplay();
 }
