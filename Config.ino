@@ -21,6 +21,8 @@
 // WiFiManager Helpers
 // ============================================================================
 
+extern String firmwareUpdatePassword;
+
 String getParam(const String& name) {
   if (wifiManager.server && wifiManager.server->hasArg(name))
     return wifiManager.server->arg(name);
@@ -106,6 +108,7 @@ void loadPreferences() {
 
   String modeStr = preferences.getString("displayMode", "bitmap");
   String rotStr  = preferences.getString("rotation",   "0");
+  firmwareUpdatePassword = preferences.getString("updatepassword", "");
   mdnsEnabled = preferences.getBool("mdnsEnabled", true);
 
   if (modeStr.equalsIgnoreCase("text")) {
