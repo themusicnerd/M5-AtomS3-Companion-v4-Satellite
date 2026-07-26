@@ -371,10 +371,11 @@ void handlePostConfig() {
 // Browser-based OTA update.  Use the application .bin from a GitHub release,
 // never a bootloader or partition image.
 const char* firmwareUpdateUser = "admin";
-const char* firmwareUpdatePassword = "companion-satellite";
+// Empty by default: updates are open until the owner elects to protect them.
+String firmwareUpdatePassword = "";
 
 bool requireFirmwareUpdateAuth() {
-  if (restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword)) return true;
+  if (firmwareUpdatePassword.length() == 0 || restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword.c_str())) return true;
   restServer.requestAuthentication();
   return false;
 }
@@ -386,11 +387,12 @@ void handleFirmwareUpdatePage() {
     "<h2>Firmware update</h2><p>Select the release application <code>.bin</code> file. "
     "Do not power off the device while it updates.</p>"
     "<form method=POST action=/update enctype=multipart/form-data>"
-    "<input type=file name=firmware accept='.bin' required><button type=submit>Install and reboot</button></form>");
+    "<input type=file name=firmware accept='.bin' required><button type=submit>Install and reboot</button></form>"
+    "<hr><h3>Optional protection</h3><form method=POST action=/update/password><input type=password name=password placeholder='Leave blank to remove'><button type=submit>Save update password</button></form>");
 }
 
 void handleFirmwareUpload() {
-  if (!restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword)) return;
+  if (firmwareUpdatePassword.length() && !restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword.c_str())) return;
   HTTPUpload& upload = restServer.upload();
   if (upload.status == UPLOAD_FILE_START) Update.begin(UPDATE_SIZE_UNKNOWN);
   else if (upload.status == UPLOAD_FILE_WRITE) Update.write(upload.buf, upload.currentSize);
@@ -404,6 +406,13 @@ void handleFirmwareUpdateResult() {
   if (success) { delay(500); ESP.restart(); }
 }
 
+void handleFirmwareUpdatePassword() {
+  if (!requireFirmwareUpdateAuth()) return;
+  firmwareUpdatePassword = restServer.arg("password");
+  preferences.begin("companion", false); preferences.putString("updatepassword", firmwareUpdatePassword); preferences.end();
+  restServer.send(200, "text/plain", firmwareUpdatePassword.length() ? "Update password saved." : "Update password removed.");
+}
+
 void setupRestServer() {
   restServer.on("/api/host", HTTP_GET, handleGetHost);
   restServer.on("/api/port", HTTP_GET, handleGetPort);
@@ -414,6 +423,7 @@ void setupRestServer() {
   restServer.on("/api/config", HTTP_POST, handlePostConfig);
   restServer.on("/update", HTTP_GET, handleFirmwareUpdatePage);
   restServer.on("/update", HTTP_POST, handleFirmwareUpdateResult, handleFirmwareUpload);
+  restServer.on("/update/password", HTTP_POST, handleFirmwareUpdatePassword);
 
   restServer.begin();
   Serial.println("[REST] REST API server started on port 9999");
