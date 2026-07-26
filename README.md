@@ -33,12 +33,12 @@ USA: https://www.adafruit.com/product/302
 
 Installation & Usage
 Initial install with ESPHome Web (recommended)
-1. Download `M5-AtomS3-Companion-v4-Satellite.ino.bin` from the latest GitHub release.
+1. Download `M5-AtomS3-Companion-v4-Satellite-factory.bin` from the latest GitHub release. This is the complete first-install image.
 2. Connect the AtomS3 with a USB **data** cable and open [ESPHome Web](https://web.esphome.io/).
 3. Select **Connect**, choose the serial device, then choose **Install** and select the downloaded `.bin`.
 4. Configure Wi-Fi and Companion after boot. Future updates use the built-in `http://<device-ip>:9999/update` page—no USB cable required.
 
-ESPHome Web is only a browser serial flasher in this workflow; it does not install ESPHome firmware.
+There are two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
 
 Arduino development environment
 1. Clone this repository.
@@ -66,7 +66,7 @@ Boot Menu
   - Rotation: 0°/90°/180°/270° — Adjust text rotation (TEXT mode only, saves immediately)
 
 OTA Firmware Update
-- **Web update:** browse to `http://<device-ip>:9999/update`, choose the release application `.bin`, then wait for the automatic reboot. It is open by default; use the **Optional protection** form on that page to set or remove a password. Once set, sign in as `admin` with your chosen password. Do not remove power during the upload.
+- **Web update:** browse to `http://<device-ip>:9999/update`, choose `M5-AtomS3-Companion-v4-Satellite.ino.bin`, then wait for the automatic reboot. It is open by default; use the **Optional protection** form on that page to set or remove a password. Once set, sign in as `admin` with your chosen password. Do not remove power during the upload.
 - Use only `M5-AtomS3-Companion-v4-Satellite.ino.bin` from a GitHub release; do not upload bootloader or partition files.
 - OTA enabled by default.
 - Hostname = m5atom-s3_XXXXX (matches deviceID)
