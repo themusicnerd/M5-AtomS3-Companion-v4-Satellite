@@ -82,6 +82,12 @@ OTA Firmware Update
 - OTA enabled by default.
 - Hostname = m5atom-s3_XXXXX (matches deviceID)
 - Password protection is optional for the browser updater; ArduinoOTA retains its existing password.
+
+The dashboard at `http://<device-ip>:9999/` shows the device name and ID,
+network and Companion connection state, IP address, display mode, latest
+incoming text and RGB colour, and message health. It refreshes every two
+seconds. Use `http://<device-ip>:9999/update` with the release application BIN
+for over-the-air updates; factory BINs are only for ESPHome Web USB installs.
 - Update from Arduino IDE using Network Ports.
 
 Troubleshooting
