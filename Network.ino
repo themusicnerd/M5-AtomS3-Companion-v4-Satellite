@@ -217,9 +217,57 @@ String jsonSetting(const String& body, const char* name) {
   String value = body.substring(pos, end); value.trim(); return value;
 }
 
+void applySerialProvisioning(const String& body) {
+  const String ssid = jsonSetting(body, "ssid");
+  const String password = jsonSetting(body, "password");
+  const String host = jsonSetting(body, "companionHost");
+  const String port = jsonSetting(body, "companionPort");
+  const String name = jsonSetting(body, "deviceName");
+  if (port.length() && (port.toInt() < 1 || port.toInt() > 65535)) {
+    Serial.println("PROVISION-ERROR invalid companionPort");
+    return;
+  }
+  preferences.begin("companion", false);
+  if (host.length()) {
+    host.toCharArray(companion_host.data(), companion_host.size());
+    preferences.putString("companionip", host);
+  }
+  if (port.length()) {
+    port.toCharArray(companion_port.data(), companion_port.size());
+    preferences.putString("companionport", port);
+  }
+  if (name.length()) {
+    configuredDeviceName = name.substring(0, 48);
+    preferences.putString("deviceName", configuredDeviceName);
+  }
+  preferences.end();
+  Serial.println("PROVISION-OK");
+#ifndef ATOMIC_POE_BUILD
+  if (ssid.length()) {
+    delay(100);
+    WiFi.persistent(true);
+    WiFi.begin(ssid.c_str(), password.c_str());
+  }
+#endif
+}
+
+void handleSerialProvisioning() {
+  while (Serial.available()) {
+    const char c = Serial.read();
+    if (c == '\n') {
+      serialProvisionBuffer.trim();
+      if (serialProvisionBuffer.startsWith("PROVISION "))
+        applySerialProvisioning(serialProvisionBuffer.substring(10));
+      serialProvisionBuffer = "";
+    } else if (c != '\r' && serialProvisionBuffer.length() < 512) {
+      serialProvisionBuffer += c;
+    }
+  }
+}
+
 void handleGetSettings() {
   const String mode = displayMode == DISPLAY_TEXT ? "text" : "bitmap";
-  const String json = "{\"displayMode\":\"" + mode + "\",\"rotation\":" + String(screenRotation * 90) + ",\"brightness\":" + String(brightness) + "}";
+  const String json = "{\"displayMode\":\"" + mode + "\",\"rotation\":" + String(screenRotation * 90) + ",\"brightness\":" + String(brightness) + ",\"ledEnabled\":" + String(ledEnabled ? "true" : "false") + ",\"ledBrightness\":" + String(ledBrightnessPercent) + "}";
   restServer.send(200, "application/json", json);
 }
 
@@ -228,14 +276,49 @@ void handlePostSettings() {
   const String mode = jsonSetting(body, "displayMode");
   const String rotation = jsonSetting(body, "rotation");
   const String brightnessValue = jsonSetting(body, "brightness");
+  const String ledEnabledValue = jsonSetting(body, "ledEnabled");
+  const String ledBrightnessValue = jsonSetting(body, "ledBrightness");
   if (mode.length() && !mode.equalsIgnoreCase("text") && !mode.equalsIgnoreCase("bitmap")) { restServer.send(400, "text/plain", "Invalid displayMode"); return; }
   if (rotation.length() && !(rotation == "0" || rotation == "90" || rotation == "180" || rotation == "270")) { restServer.send(400, "text/plain", "Invalid rotation"); return; }
   if (brightnessValue.length() && (brightnessValue.toInt() < 0 || brightnessValue.toInt() > 100)) { restServer.send(400, "text/plain", "Invalid brightness"); return; }
+  if (ledEnabledValue.length() && !(ledEnabledValue == "true" || ledEnabledValue == "false")) { restServer.send(400, "text/plain", "Invalid ledEnabled"); return; }
+  if (ledBrightnessValue.length() && (ledBrightnessValue.toInt() < 0 || ledBrightnessValue.toInt() > 200)) { restServer.send(400, "text/plain", "Invalid ledBrightness"); return; }
   if (mode.length()) displayMode = mode.equalsIgnoreCase("text") ? DISPLAY_TEXT : DISPLAY_BITMAP;
   if (rotation.length()) screenRotation = degreesToRotationIndex(rotation.toInt());
   if (brightnessValue.length()) { brightness = brightnessValue.toInt(); applyDisplayBrightness(); }
+  if (ledEnabledValue.length()) ledEnabled = ledEnabledValue == "true";
+  if (ledBrightnessValue.length()) ledBrightnessPercent = ledBrightnessValue.toInt();
   saveDisplaySettings();
+  setExternalLedColor(lastColorR, lastColorG, lastColorB);
   M5.Display.setRotation(displayMode == DISPLAY_TEXT ? screenRotation : 0);
+  restServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handlePostHardwareTest() {
+  const String body = restServer.arg("plain");
+  const String target = jsonSetting(body, "target");
+  const String value = jsonSetting(body, "value");
+  if (target == "led") {
+    if (value == "red") setExternalLedColor(255, 0, 0);
+    else if (value == "green") setExternalLedColor(0, 255, 0);
+    else if (value == "blue") setExternalLedColor(0, 0, 255);
+    else if (value == "white") setExternalLedColor(255, 255, 255);
+    else if (value == "off") setExternalLedColor(0, 0, 0);
+    else { restServer.send(400, "text/plain", "LED value must be red, green, blue, white, or off"); return; }
+  } else if (target == "display") {
+    if (value == "red") M5.Display.fillScreen(RED);
+    else if (value == "green") M5.Display.fillScreen(GREEN);
+    else if (value == "blue") M5.Display.fillScreen(BLUE);
+    else if (value == "white") M5.Display.fillScreen(WHITE);
+    else if (value == "off") M5.Display.fillScreen(BLACK);
+    else { restServer.send(400, "text/plain", "Display value must be red, green, blue, white, or off"); return; }
+  } else if (target == "text") {
+    if (!value.length()) { restServer.send(400, "text/plain", "Provide test text"); return; }
+    setText(value.substring(0, 96));
+  } else {
+    restServer.send(400, "text/plain", "target must be led, display, or text");
+    return;
+  }
   restServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -464,7 +547,7 @@ String statusJsonEscape(String value) {
 }
 
 void handleStatus() {
-  String json = "{\"deviceName\":\"M5 AtomS3\",\"deviceId\":\"" + statusJsonEscape(deviceID) + "\",";
+  String json = "{\"deviceName\":\"" + statusJsonEscape(configuredDeviceName.length() ? configuredDeviceName : "M5 AtomS3") + "\",\"deviceId\":\"" + statusJsonEscape(deviceID) + "\",\"firmware\":\"" FIRMWARE_VERSION "\",";
 #ifdef ATOMIC_POE_BUILD
   json += "\"network\":\"ethernet\",\"networkConnected\":" + String(Ethernet.linkStatus() == LinkON ? "true" : "false") + ",";
 #else
@@ -475,6 +558,8 @@ void handleStatus() {
   json += "\"companion\":\"" + statusJsonEscape(String(companion_host.data()) + ":" + companion_port.data()) + "\",";
   json += "\"text\":\"" + statusJsonEscape(currentText) + "\",\"displayMode\":\"" +
     String(displayMode == DISPLAY_TEXT ? "text" : "bitmap") + "\",";
+  json += "\"ledEnabled\":" + String(ledEnabled ? "true" : "false") + ",\"ledBrightness\":" + String(ledBrightnessPercent) + ",";
+  json += "\"buttonPressed\":" + String(M5.BtnA.isPressed() ? "true" : "false") + ",";
   json += "\"color\":{\"r\":" + String(lastColorR) + ",\"g\":" + String(lastColorG) + ",\"b\":" + String(lastColorB) + "},";
   json += "\"lastMessageAgeMs\":" + String(lastMessageTime ? millis() - lastMessageTime : 0) +
     ",\"uptimeSeconds\":" + String(millis() / 1000) + "}";
@@ -499,15 +584,20 @@ void handleConfigPage() {
     String(mode == "text" ? " selected" : "") + ">text</option></select></label><br>"
     "<label>Rotation <select id=r><option>0</option><option>90</option><option>180</option>"
     "<option>270</option></select></label><br><button onclick=s()>Save</button> "
+    "<label><input id=le type=checkbox" + String(ledEnabled ? " checked" : "") + "> External RGB LED enabled</label> <label>LED scale <input id=lb type=number min=0 max=200 value='" + String(ledBrightnessPercent) + "'>%</label><br>"
+    "<hr><b>Hardware tests</b><p>Button: <strong id=bt>released</strong></p>"
+    "<p>External LED: <button onclick=tt('led','red')>Red</button> <button onclick=tt('led','green')>Green</button> <button onclick=tt('led','blue')>Blue</button> <button onclick=tt('led','white')>White</button> <button onclick=tt('led','off')>Off</button></p>"
+    "<p>Screen: <button onclick=tt('display','red')>Red</button> <button onclick=tt('display','green')>Green</button> <button onclick=tt('display','blue')>Blue</button> <button onclick=tt('display','white')>White</button> <button onclick=tt('display','off')>Off</button></p>"
+    "<p><input id=tx placeholder='Screen test text'><button onclick=tt('text',tx.value)>Show text</button></p>"
     "<a href=/update>Firmware update</a><pre id=o></pre><script>r.value='" +
     String(screenRotation * 90) + "';async function s(){let a=await fetch('/api/config',{method:'POST',"
     "headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h.value,port:+p.value})});"
     "let b=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},"
-    "body:JSON.stringify({displayMode:m.value,rotation:+r.value})});o.textContent=(await a.text())+' '+"
-    "(await b.text())}async function u(){try{let x=await(await fetch('/api/status')).json();"
+    "body:JSON.stringify({displayMode:m.value,rotation:+r.value,ledEnabled:le.checked,ledBrightness:+lb.value})});o.textContent=(await a.text())+' '+"
+    "(await b.text())}async function tt(target,value){let z=await fetch('/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target,value})});o.textContent=await z.text()}async function u(){try{let x=await(await fetch('/api/status')).json();"
     "state.textContent=(x.networkConnected?'Network connected':'Network disconnected')+' | '+"
     "(x.companionConnected?'Companion connected':'Companion disconnected')+' | '+(x.ip||x.network);"
-    "t.textContent=x.text||'(none)';let q=x.color;c.textContent=`rgb(${q.r}, ${q.g}, ${q.b})`;"
+    "t.textContent=x.text||'(none)';bt.textContent=x.buttonPressed?'PRESSED':'released';let q=x.color;c.textContent=`rgb(${q.r}, ${q.g}, ${q.b})`;"
     "sw.style.background=`rgb(${q.r},${q.g},${q.b})`}catch(e){state.textContent='Status unavailable'}}"
     "u();setInterval(u,2000)</script>";
   restServer.send(200, "text/html", html);
@@ -525,6 +615,7 @@ void setupRestServer() {
   restServer.on("/api/port", HTTP_POST, handlePostPort);
   restServer.on("/api/config", HTTP_POST, handlePostConfig);
   restServer.on("/api/settings", HTTP_POST, handlePostSettings);
+  restServer.on("/api/test", HTTP_POST, handlePostHardwareTest);
   restServer.on("/update", HTTP_GET, handleFirmwareUpdatePage);
   restServer.on("/update", HTTP_POST, handleFirmwareUpdateResult, handleFirmwareUpload);
   restServer.on("/update/password", HTTP_POST, handleFirmwareUpdatePassword);

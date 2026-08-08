@@ -11,6 +11,8 @@ Features
     - Auto-wraps text similar to companion
     - Supports COLOR= and TEXTCOLOR=
 - External RGB LED output on G8/G5/G6 (G7 = Ground), mirrors key colour
+- Synchronized red, green, blue and white screen/LED self-test at boot, with
+  each colour shown for 300 ms
 - Interactive boot menu — Hold button during boot to configure settings
 - QR code display for easy WiFi setup and web portal access
 - Optional mDNS service discovery (companion-satellite._tcp) for automatic device discovery
@@ -61,7 +63,8 @@ Arduino development environment
 8. On first boot, device will create a WiFi access point (SSID = m5atom-s3_XXXXX).
 9. Device displays QR code for easy WiFi connection (press button to toggle details).
 10. Scan QR code or connect manually to the AP, then configure WiFi credentials, Companion IP/Port, display mode, and mDNS discovery at 192.168.4.1.
-11. Device will connect to WiFi and show "Ready" screen.
+11. Device connects to Wi-Fi and, while waiting for Companion, shows the network
+    name in green and its `IP-address:9999` setup URL in yellow on the next line.
 12. In Companion v4: Device is automatically discovered via mDNS when enabled, or can be configured manually with the Companion IP and port. Boot into Web Config mode to change either setting.
 13. Press button to send KEY-PRESS to Companion. LED mirrors key color.
 
@@ -72,9 +75,33 @@ Boot Menu
 - Options:
   - Boot: Normal — Continue normal boot
   - Boot: Web Config — Open config portal on current WiFi (displays QR code for portal URL, press button to toggle details)
-  - Boot: Reset — Create WiFi AP for reconfiguration (displays WiFi QR code, press button to toggle details)
+  - Boot: WiFi AP — Create a Wi-Fi AP for reconfiguration (displays a Wi-Fi QR code; press the button to toggle details)
   - Display: BITMAP/TEXT — Toggle display mode (saves immediately)
   - Rotation: 0°/90°/180°/270° — Adjust text rotation (TEXT mode only, saves immediately)
+
+### Change or reset the Wi-Fi connection
+
+Hold the AtomS3 button during boot, short-click to **Boot: WiFi AP**, then hold for
+one second to select it. Join the displayed `m5atom-s3_XXXXX` network, open
+`http://192.168.4.1/` if needed, choose the replacement Wi-Fi network, and save.
+This replaces the stored Wi-Fi credentials. **Boot: Web Config** changes
+Companion and display settings while retaining the current Wi-Fi connection.
+The Atomic PoE build uses Ethernet and has no Wi-Fi credentials to reset.
+
+### Companion discovery and one-click setup
+
+When mDNS discovery is enabled, the Wi-Fi build advertises
+`_companion-satellite._tcp`. In Companion, open **Surfaces > Remote Surfaces**,
+find the AtomS3, select **+ Setup**, choose the address Companion should
+advertise, and confirm. Companion writes that address and Satellite TCP port
+`16622` to the device's REST API on port `9999`.
+
+The enable/disable switch shown for devices such as Stream Deck Network Dock is
+provided by their Companion surface-integration module and does not apply to
+Satellite API connections. **+ Setup** is the expected claiming flow for this
+firmware. mDNS requires a shared broadcast domain or an mDNS reflector between
+VLANs. Use Web Config or the port `9999` dashboard when discovery is unavailable;
+the Atomic PoE build currently uses this manual path.
 
 OTA Firmware Update
 - **Web update:** browse to `http://<device-ip>:9999/update`, choose the matching `*-wifi.ino.bin` or `*-poe.ino.bin`, then wait for the automatic reboot. It is open by default; use the **Optional protection** form on that page to set or remove a password. Once set, sign in as `admin` with your chosen password. Do not remove power during the upload.
@@ -107,7 +134,8 @@ Version History
 v1.3.10
 - Separate Wi-Fi + LED and Atomic PoE/W5500 firmware variants
 - Wired DHCP setup, REST settings and streamed browser firmware updates
-- Persistent brightness, display mode and rotation settings
+- Persistent brightness, display mode, rotation, external RGB LED enable, and 0-200% LED scale settings
+- Port 9999 hardware tests and optional Web Serial batch provisioning
 v1.4
 - mDNS service discovery for automatic device detection
 - DeviceID format changed to m5atom-s3_XXXXX (last 5 MAC chars)

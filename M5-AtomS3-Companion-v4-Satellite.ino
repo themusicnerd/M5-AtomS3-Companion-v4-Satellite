@@ -17,6 +17,8 @@
  * ============================================================================
  */
 
+#define FIRMWARE_VERSION "1.3.11"
+
 #include <M5Unified.h>
 #include <M5GFX.h>
 #ifdef ATOMIC_POE_BUILD
@@ -111,6 +113,7 @@ unsigned long getBackoffInterval(unsigned long sinceTime);
 bool parseColorToken(const String& line, const String& key, int &r, int &g, int &b);
 void clearScreen(uint16_t color = BLACK);
 void drawCenterText(const String& txt, uint16_t color = WHITE, uint16_t bg = BLACK);
+void drawCompanionWaitingScreen(const String& networkName, const String& setupAddress);
 void applyDisplayBrightness();
 void drawBitmapRGB888FullScreen(uint8_t* rgb, int size);
 void refreshTextDisplay();
@@ -120,6 +123,7 @@ void drawReconnectingOverlay();
 
 // Hardware.ino
 void setupLED();
+void runBootColorTest();
 void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b);
 void updateReconnectingLED();
 
@@ -131,6 +135,7 @@ void setupRestServer();
 void runAPConfigPortal(const String& wifiHostname);
 void connectToNetwork();
 void initializeMDNS();
+void handleSerialProvisioning();
 
 // Config.ino
 int degreesToRotationIndex(int degrees);
@@ -182,6 +187,10 @@ const unsigned long pingIntervalMs = 1000;
 
 // Display & LED
 int brightness = 100;
+bool ledEnabled = true;
+int ledBrightnessPercent = 100;
+String configuredDeviceName = "";
+String serialProvisionBuffer = "";
 
 const int LED_PIN_RED   = G8;
 const int LED_PIN_GREEN = G5;
@@ -376,13 +385,14 @@ void setup() {
   applyDisplayBrightness();
   clearScreen(BLACK);
 
+  setupLED();
+  runBootColorTest();
+
   // Boot menu if button held
   if (M5.BtnA.isPressed())
     runBootMenu();
 
   drawCenterText("Booting...\n\n\nHold button\non boot\nfor MENU", WHITE, BLACK);
-
-  setupLED();
 
 #ifndef ATOMIC_POE_BUILD
   WiFi.setHostname(deviceID.c_str());
@@ -406,12 +416,21 @@ void setup() {
   clearScreen(BLACK);
   setExternalLedColor(0, 0, 0);
 
-  String waitMsg =
-    "Waiting for\nCompanion\n\n" +
-    String(companion_host.data()) + ":" + String(companion_port.data()) +
-    "\n\n" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " mode";
-
-  drawCenterText(waitMsg, WHITE, BLACK);
+  String networkName;
+  String setupAddress;
+#ifdef ATOMIC_POE_BUILD
+  networkName = "Ethernet";
+  setupAddress = Ethernet.localIP().toString() + ":9999";
+#else
+  if (WiFi.status() == WL_CONNECTED) {
+    networkName = WiFi.SSID();
+    setupAddress = WiFi.localIP().toString() + ":9999";
+  } else {
+    networkName = "WiFi not connected";
+    setupAddress = "0.0.0.0:9999";
+  }
+#endif
+  drawCompanionWaitingScreen(networkName, setupAddress);
 
   Serial.println("[System] Setup complete, entering main loop.");
 }
@@ -424,6 +443,7 @@ void loop() {
   Ethernet.maintain();
 #endif
   restServer.handleClient();
+  handleSerialProvisioning();
 
   unsigned long now = millis();
 
@@ -452,7 +472,7 @@ void loop() {
 
   // Attempt reconnection with progressive backoff
   unsigned long reconnectInterval = getBackoffInterval(firstDisconnectTime);
-  if (!tcpConnected && (now - lastConnectTry >= reconnectInterval)) {
+  if (companion_host[0] != '\0' && !tcpConnected && (now - lastConnectTry >= reconnectInterval)) {
     connectionState = CONN_RECONNECTING;
     lastConnectTry = now;
 

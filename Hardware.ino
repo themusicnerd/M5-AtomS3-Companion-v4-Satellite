@@ -40,8 +40,25 @@ void setupLED() {
   attachLedPwm(LED_PIN_BLUE, 2);
 
   setExternalLedColor(0, 0, 0);
-  setExternalLedColor(255, 255, 255);  // Power-on test
 #endif
+}
+
+void runBootColorTest() {
+  const uint8_t colors[][3] = {
+    {255, 0, 0},
+    {0, 255, 0},
+    {0, 0, 255},
+    {255, 255, 255}
+  };
+
+  for (const auto& color : colors) {
+    M5.Display.fillScreen(M5.Display.color565(color[0], color[1], color[2]));
+    setExternalLedColor(color[0], color[1], color[2]);
+    delay(300);
+  }
+
+  M5.Display.fillScreen(BLACK);
+  setExternalLedColor(0, 0, 0);
 }
 
 // ============================================================================
@@ -56,9 +73,12 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
   // For common anode LED, invert: scaledX = 255 - scaledX
 
 #ifndef ATOMIC_POE_BUILD
-  writeLedPwm(LED_PIN_RED, 0, r);
-  writeLedPwm(LED_PIN_GREEN, 1, g);
-  writeLedPwm(LED_PIN_BLUE, 2, b);
+  const uint8_t outputR = ledEnabled ? min(255, int(r) * ledBrightnessPercent / 100) : 0;
+  const uint8_t outputG = ledEnabled ? min(255, int(g) * ledBrightnessPercent / 100) : 0;
+  const uint8_t outputB = ledEnabled ? min(255, int(b) * ledBrightnessPercent / 100) : 0;
+  writeLedPwm(LED_PIN_RED, 0, outputR);
+  writeLedPwm(LED_PIN_GREEN, 1, outputG);
+  writeLedPwm(LED_PIN_BLUE, 2, outputB);
 #endif
 }
 

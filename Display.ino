@@ -177,6 +177,45 @@ void drawCenterText(const String& txt, uint16_t color, uint16_t bg) {
   }
 }
 
+void drawCompanionWaitingScreen(const String& networkName, const String& setupAddress) {
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setFont(&fonts::Font0);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextDatum(middle_center);
+
+  const String wifiLabel = "WiFi";
+  const String separator = "/";
+  const String webLabel = "WebInterface";
+  const int headerWidth = M5.Display.textWidth(wifiLabel) + M5.Display.textWidth(separator) + M5.Display.textWidth(webLabel);
+  int headerX = (M5.Display.width() - headerWidth) / 2;
+  M5.Display.setTextDatum(middle_left);
+  M5.Display.setTextColor(GREEN, BLACK);
+  M5.Display.drawString(wifiLabel, headerX, 7);
+  headerX += M5.Display.textWidth(wifiLabel);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.drawString(separator, headerX, 7);
+  headerX += M5.Display.textWidth(separator);
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.drawString(webLabel, headerX, 7);
+  M5.Display.setTextDatum(middle_center);
+
+  M5.Display.setTextColor(GREEN, BLACK);
+  M5.Display.drawString(networkName, M5.Display.width() / 2, 22);
+
+  M5.Display.setTextColor(YELLOW, BLACK);
+  M5.Display.drawString(setupAddress, M5.Display.width() / 2, 38);
+
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.drawString("Waiting for", M5.Display.width() / 2, 63);
+  M5.Display.drawString("Companion", M5.Display.width() / 2, 75);
+
+  const String shortId = deviceID.length() > 5 ? deviceID.substring(deviceID.length() - 5) : deviceID;
+  M5.Display.setTextColor(CYAN, BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString(shortId, M5.Display.width() / 2, M5.Display.height() - 10);
+  M5.Display.setTextSize(1);
+}
+
 void applyDisplayBrightness() {
   int p = brightness;
   if (p < 1)   p = 1;
