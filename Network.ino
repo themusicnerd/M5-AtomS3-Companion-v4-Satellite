@@ -196,6 +196,132 @@ void handleGetConfig() {
   Serial.println("[REST] GET /api/config: " + json);
 }
 
+// Device-specific settings are intentionally separate from /api/config: that
+// endpoint is owned by Companion's Satellite discovery and only carries host
+// and port.  A Companion module (or another REST client) can use this endpoint
+// without interfering with the one-click surface setup flow.
+String jsonSetting(const String& body, const char* name) {
+  const String key = String("\"") + name + "\"";
+  int pos = body.indexOf(key);
+  if (pos < 0) return "";
+  pos = body.indexOf(':', pos + key.length());
+  if (pos < 0) return "";
+  pos++;
+  while (pos < body.length() && isspace(body[pos])) pos++;
+  if (pos < body.length() && body[pos] == '\"') {
+    const int end = body.indexOf('\"', ++pos);
+    return end < 0 ? "" : body.substring(pos, end);
+  }
+  int end = pos;
+  while (end < body.length() && body[end] != ',' && body[end] != '}') end++;
+  String value = body.substring(pos, end); value.trim(); return value;
+}
+
+void applySerialProvisioning(const String& body) {
+  const String ssid = jsonSetting(body, "ssid");
+  const String password = jsonSetting(body, "password");
+  const String host = jsonSetting(body, "companionHost");
+  const String port = jsonSetting(body, "companionPort");
+  const String name = jsonSetting(body, "deviceName");
+  if (port.length() && (port.toInt() < 1 || port.toInt() > 65535)) {
+    Serial.println("PROVISION-ERROR invalid companionPort");
+    return;
+  }
+  preferences.begin("companion", false);
+  if (host.length()) {
+    host.toCharArray(companion_host.data(), companion_host.size());
+    preferences.putString("companionip", host);
+  }
+  if (port.length()) {
+    port.toCharArray(companion_port.data(), companion_port.size());
+    preferences.putString("companionport", port);
+  }
+  if (name.length()) {
+    configuredDeviceName = name.substring(0, 48);
+    preferences.putString("deviceName", configuredDeviceName);
+  }
+  preferences.end();
+  Serial.println("PROVISION-OK");
+#ifndef ATOMIC_POE_BUILD
+  if (ssid.length()) {
+    delay(100);
+    WiFi.persistent(true);
+    WiFi.begin(ssid.c_str(), password.c_str());
+  }
+#endif
+}
+
+void handleSerialProvisioning() {
+  while (Serial.available()) {
+    const char c = Serial.read();
+    if (c == '\n') {
+      serialProvisionBuffer.trim();
+      if (serialProvisionBuffer.startsWith("PROVISION "))
+        applySerialProvisioning(serialProvisionBuffer.substring(10));
+      serialProvisionBuffer = "";
+    } else if (c != '\r' && serialProvisionBuffer.length() < 512) {
+      serialProvisionBuffer += c;
+    }
+  }
+}
+
+void handleGetSettings() {
+  const String mode = displayMode == DISPLAY_TEXT ? "text" : "bitmap";
+  const String json = "{\"displayMode\":\"" + mode + "\",\"rotation\":" + String(screenRotation * 90) + ",\"brightness\":" + String(brightness) + ",\"ledEnabled\":" + String(ledEnabled ? "true" : "false") + ",\"ledBrightness\":" + String(ledBrightnessPercent) + "}";
+  restServer.send(200, "application/json", json);
+}
+
+void handlePostSettings() {
+  const String body = restServer.arg("plain");
+  const String mode = jsonSetting(body, "displayMode");
+  const String rotation = jsonSetting(body, "rotation");
+  const String brightnessValue = jsonSetting(body, "brightness");
+  const String ledEnabledValue = jsonSetting(body, "ledEnabled");
+  const String ledBrightnessValue = jsonSetting(body, "ledBrightness");
+  if (mode.length() && !mode.equalsIgnoreCase("text") && !mode.equalsIgnoreCase("bitmap")) { restServer.send(400, "text/plain", "Invalid displayMode"); return; }
+  if (rotation.length() && !(rotation == "0" || rotation == "90" || rotation == "180" || rotation == "270")) { restServer.send(400, "text/plain", "Invalid rotation"); return; }
+  if (brightnessValue.length() && (brightnessValue.toInt() < 0 || brightnessValue.toInt() > 100)) { restServer.send(400, "text/plain", "Invalid brightness"); return; }
+  if (ledEnabledValue.length() && !(ledEnabledValue == "true" || ledEnabledValue == "false")) { restServer.send(400, "text/plain", "Invalid ledEnabled"); return; }
+  if (ledBrightnessValue.length() && (ledBrightnessValue.toInt() < 0 || ledBrightnessValue.toInt() > 200)) { restServer.send(400, "text/plain", "Invalid ledBrightness"); return; }
+  if (mode.length()) displayMode = mode.equalsIgnoreCase("text") ? DISPLAY_TEXT : DISPLAY_BITMAP;
+  if (rotation.length()) screenRotation = degreesToRotationIndex(rotation.toInt());
+  if (brightnessValue.length()) { brightness = brightnessValue.toInt(); applyDisplayBrightness(); }
+  if (ledEnabledValue.length()) ledEnabled = ledEnabledValue == "true";
+  if (ledBrightnessValue.length()) ledBrightnessPercent = ledBrightnessValue.toInt();
+  saveDisplaySettings();
+  setExternalLedColor(lastColorR, lastColorG, lastColorB);
+  M5.Display.setRotation(displayMode == DISPLAY_TEXT ? screenRotation : 0);
+  restServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handlePostHardwareTest() {
+  const String body = restServer.arg("plain");
+  const String target = jsonSetting(body, "target");
+  const String value = jsonSetting(body, "value");
+  if (target == "led") {
+    if (value == "red") setExternalLedColor(255, 0, 0);
+    else if (value == "green") setExternalLedColor(0, 255, 0);
+    else if (value == "blue") setExternalLedColor(0, 0, 255);
+    else if (value == "white") setExternalLedColor(255, 255, 255);
+    else if (value == "off") setExternalLedColor(0, 0, 0);
+    else { restServer.send(400, "text/plain", "LED value must be red, green, blue, white, or off"); return; }
+  } else if (target == "display") {
+    if (value == "red") M5.Display.fillScreen(RED);
+    else if (value == "green") M5.Display.fillScreen(GREEN);
+    else if (value == "blue") M5.Display.fillScreen(BLUE);
+    else if (value == "white") M5.Display.fillScreen(WHITE);
+    else if (value == "off") M5.Display.fillScreen(BLACK);
+    else { restServer.send(400, "text/plain", "Display value must be red, green, blue, white, or off"); return; }
+  } else if (target == "text") {
+    if (!value.length()) { restServer.send(400, "text/plain", "Provide test text"); return; }
+    setText(value.substring(0, 96));
+  } else {
+    restServer.send(400, "text/plain", "target must be led, display, or text");
+    return;
+  }
+  restServer.send(200, "application/json", "{\"ok\":true}");
+}
+
 void handlePostHost() {
   String newHost = "";
 
@@ -393,10 +519,11 @@ void handleFirmwareUpdatePage() {
 
 void handleFirmwareUpload() {
   if (firmwareUpdatePassword.length() && !restServer.authenticate(firmwareUpdateUser, firmwareUpdatePassword.c_str())) return;
-  HTTPUpload& upload = restServer.upload();
+  auto& upload = restServer.upload();
   if (upload.status == UPLOAD_FILE_START) Update.begin(UPDATE_SIZE_UNKNOWN);
   else if (upload.status == UPLOAD_FILE_WRITE) Update.write(upload.buf, upload.currentSize);
   else if (upload.status == UPLOAD_FILE_END) Update.end(true);
+  else if (upload.status == UPLOAD_FILE_ABORTED) Update.abort();
 }
 
 void handleFirmwareUpdateResult() {
@@ -413,14 +540,82 @@ void handleFirmwareUpdatePassword() {
   restServer.send(200, "text/plain", firmwareUpdatePassword.length() ? "Update password saved." : "Update password removed.");
 }
 
+String statusJsonEscape(String value) {
+  value.replace("\\", "\\\\"); value.replace("\"", "\\\"");
+  value.replace("\n", "\\n"); value.replace("\r", "\\r");
+  return value;
+}
+
+void handleStatus() {
+  String json = "{\"deviceName\":\"" + statusJsonEscape(configuredDeviceName.length() ? configuredDeviceName : "M5 AtomS3") + "\",\"deviceId\":\"" + statusJsonEscape(deviceID) + "\",\"firmware\":\"" FIRMWARE_VERSION "\",";
+#ifdef ATOMIC_POE_BUILD
+  json += "\"network\":\"ethernet\",\"networkConnected\":" + String(Ethernet.linkStatus() == LinkON ? "true" : "false") + ",";
+#else
+  json += "\"network\":\"wifi\",\"networkConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+  json += "\"ssid\":\"" + statusJsonEscape(WiFi.SSID()) + "\",\"ip\":\"" + WiFi.localIP().toString() + "\",";
+#endif
+  json += "\"companionConnected\":" + String(client.connected() ? "true" : "false") + ",";
+  json += "\"companion\":\"" + statusJsonEscape(String(companion_host.data()) + ":" + companion_port.data()) + "\",";
+  json += "\"text\":\"" + statusJsonEscape(currentText) + "\",\"displayMode\":\"" +
+    String(displayMode == DISPLAY_TEXT ? "text" : "bitmap") + "\",";
+  json += "\"ledEnabled\":" + String(ledEnabled ? "true" : "false") + ",\"ledBrightness\":" + String(ledBrightnessPercent) + ",";
+  json += "\"buttonPressed\":" + String(M5.BtnA.isPressed() ? "true" : "false") + ",";
+  json += "\"color\":{\"r\":" + String(lastColorR) + ",\"g\":" + String(lastColorG) + ",\"b\":" + String(lastColorB) + "},";
+  json += "\"lastMessageAgeMs\":" + String(lastMessageTime ? millis() - lastMessageTime : 0) +
+    ",\"uptimeSeconds\":" + String(millis() / 1000) + "}";
+  restServer.send(200, "application/json", json);
+}
+
+void handleConfigPage() {
+  const String mode = displayMode == DISPLAY_TEXT ? "text" : "bitmap";
+  const String html =
+    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>M5 AtomS3</title><h2>M5 AtomS3</h2><h3>Live troubleshooting status</h3>"
+    "<div id=state>Loading...</div><p>Incoming text: <code id=t>-</code></p>"
+    "<p>Incoming colour: <span id=sw style='display:inline-block;width:2em;height:1em;border:1px solid'></span> <code id=c>-</code></p><p>Network: "
+#ifdef ATOMIC_POE_BUILD
+    "Atomic PoE / W5500"
+#else
+    "Wi-Fi"
+#endif
+    "</p><label>Companion host <input id=h value='" + String(companion_host.data()) +
+    "'></label><br><label>Port <input id=p value='" + String(companion_port.data()) +
+    "'></label><br><label>Display <select id=m><option>bitmap</option><option" +
+    String(mode == "text" ? " selected" : "") + ">text</option></select></label><br>"
+    "<label>Rotation <select id=r><option>0</option><option>90</option><option>180</option>"
+    "<option>270</option></select></label><br><button onclick=s()>Save</button> "
+    "<label><input id=le type=checkbox" + String(ledEnabled ? " checked" : "") + "> External RGB LED enabled</label> <label>LED scale <input id=lb type=number min=0 max=200 value='" + String(ledBrightnessPercent) + "'>%</label><br>"
+    "<hr><b>Hardware tests</b><p>Button: <strong id=bt>released</strong></p>"
+    "<p>External LED: <button onclick=tt('led','red')>Red</button> <button onclick=tt('led','green')>Green</button> <button onclick=tt('led','blue')>Blue</button> <button onclick=tt('led','white')>White</button> <button onclick=tt('led','off')>Off</button></p>"
+    "<p>Screen: <button onclick=tt('display','red')>Red</button> <button onclick=tt('display','green')>Green</button> <button onclick=tt('display','blue')>Blue</button> <button onclick=tt('display','white')>White</button> <button onclick=tt('display','off')>Off</button></p>"
+    "<p><input id=tx placeholder='Screen test text'><button onclick=tt('text',tx.value)>Show text</button></p>"
+    "<a href=/update>Firmware update</a><pre id=o></pre><script>r.value='" +
+    String(screenRotation * 90) + "';async function s(){let a=await fetch('/api/config',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h.value,port:+p.value})});"
+    "let b=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({displayMode:m.value,rotation:+r.value,ledEnabled:le.checked,ledBrightness:+lb.value})});o.textContent=(await a.text())+' '+"
+    "(await b.text())}async function tt(target,value){let z=await fetch('/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target,value})});o.textContent=await z.text()}async function u(){try{let x=await(await fetch('/api/status')).json();"
+    "state.textContent=(x.networkConnected?'Network connected':'Network disconnected')+' | '+"
+    "(x.companionConnected?'Companion connected':'Companion disconnected')+' | '+(x.ip||x.network);"
+    "t.textContent=x.text||'(none)';bt.textContent=x.buttonPressed?'PRESSED':'released';let q=x.color;c.textContent=`rgb(${q.r}, ${q.g}, ${q.b})`;"
+    "sw.style.background=`rgb(${q.r},${q.g},${q.b})`}catch(e){state.textContent='Status unavailable'}}"
+    "u();setInterval(u,2000)</script>";
+  restServer.send(200, "text/html", html);
+}
+
 void setupRestServer() {
+  restServer.on("/", HTTP_GET, handleConfigPage);
   restServer.on("/api/host", HTTP_GET, handleGetHost);
   restServer.on("/api/port", HTTP_GET, handleGetPort);
   restServer.on("/api/config", HTTP_GET, handleGetConfig);
+  restServer.on("/api/settings", HTTP_GET, handleGetSettings);
+  restServer.on("/api/status", HTTP_GET, handleStatus);
 
   restServer.on("/api/host", HTTP_POST, handlePostHost);
   restServer.on("/api/port", HTTP_POST, handlePostPort);
   restServer.on("/api/config", HTTP_POST, handlePostConfig);
+  restServer.on("/api/settings", HTTP_POST, handlePostSettings);
+  restServer.on("/api/test", HTTP_POST, handlePostHardwareTest);
   restServer.on("/update", HTTP_GET, handleFirmwareUpdatePage);
   restServer.on("/update", HTTP_POST, handleFirmwareUpdateResult, handleFirmwareUpload);
   restServer.on("/update/password", HTTP_POST, handleFirmwareUpdatePassword);
@@ -441,6 +636,7 @@ void setupRestServer() {
 // ============================================================================
 
 // Run non-blocking AP config portal with QR code display
+#ifndef ATOMIC_POE_BUILD
 void runAPConfigPortal(const String& wifiHostname) {
   Serial.println("[WiFi] Starting config portal (AP mode)");
 
@@ -474,7 +670,6 @@ void runAPConfigPortal(const String& wifiHostname) {
     delay(10);
   }
 }
-
 void connectToNetwork() {
   if (stationIP != IPAddress(0,0,0,0))
     wifiManager.setSTAStaticIPConfig(stationIP, stationGW, stationMask);
@@ -588,12 +783,38 @@ void connectToNetwork() {
     M5.Display.setRotation(0);
   }
 }
+#else
+void runAPConfigPortal(const String&) {}
+
+void connectToNetwork() {
+  uint8_t ethernetMac[6];
+  esp_read_mac(ethernetMac, ESP_MAC_WIFI_STA);
+  Serial.println("[Ethernet] Initialising Atomic PoE W5500");
+  drawCenterText("Ethernet\nDHCP...", WHITE, BLACK);
+  SPI.begin(5, 7, 8, -1);
+  Ethernet.init(6);
+  while (Ethernet.begin(ethernetMac, 15000, 4000) == 0) {
+    Serial.println("[Ethernet] DHCP failed; retrying");
+    drawCenterText("Ethernet\nDHCP failed\nRetrying...", RED, BLACK);
+    delay(5000);
+  }
+  Serial.println("[Ethernet] DHCP address: " + Ethernet.localIP().toString());
+  drawCenterText("Ethernet ready\n\n" + Ethernet.localIP().toString() +
+                 "\n\nSetup:\nhttp://" + Ethernet.localIP().toString() + ":9999", GREEN, BLACK);
+  delay(1500);
+  M5.Display.setRotation(displayMode == DISPLAY_TEXT ? screenRotation : 0);
+}
+#endif
 
 // ============================================================================
 // mDNS Service Discovery
 // ============================================================================
 
 void initializeMDNS() {
+#ifdef ATOMIC_POE_BUILD
+  Serial.println("[mDNS] W5500 build: use the displayed DHCP address and wired setup page");
+  return;
+#else
   if (!mdnsEnabled) {
     Serial.println("[mDNS] Discovery disabled in configuration");
     return;
@@ -630,4 +851,5 @@ void initializeMDNS() {
       }
     }
   }
+#endif
 }

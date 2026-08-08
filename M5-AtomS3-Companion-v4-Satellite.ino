@@ -17,20 +17,29 @@
  * ============================================================================
  */
 
+#define FIRMWARE_VERSION "1.3.11"
+
 #include <M5Unified.h>
 #include <M5GFX.h>
+#ifdef ATOMIC_POE_BUILD
+#include <SPI.h>
+#include <M5_Ethernet.h>
+#include <esp_mac.h>
+#include "PoeWebServer.h"
+#else
 #include <WiFi.h>
 #include <WiFiManager.h>
-#include <Preferences.h>
 #include <ArduinoOTA.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#endif
+#include <Preferences.h>
 #include <Update.h>
 #include <memory>
 #include <mbedtls/base64.h>
 #include <vector>
 #include <math.h>
 #include <esp32-hal-ledc.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
 
 // ============================================================================
 // Display Mode Constants
@@ -104,6 +113,7 @@ unsigned long getBackoffInterval(unsigned long sinceTime);
 bool parseColorToken(const String& line, const String& key, int &r, int &g, int &b);
 void clearScreen(uint16_t color = BLACK);
 void drawCenterText(const String& txt, uint16_t color = WHITE, uint16_t bg = BLACK);
+void drawCompanionWaitingScreen(const String& networkName, const String& setupAddress);
 void applyDisplayBrightness();
 void drawBitmapRGB888FullScreen(uint8_t* rgb, int size);
 void refreshTextDisplay();
@@ -113,6 +123,7 @@ void drawReconnectingOverlay();
 
 // Hardware.ino
 void setupLED();
+void runBootColorTest();
 void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b);
 void updateReconnectingLED();
 
@@ -124,6 +135,7 @@ void setupRestServer();
 void runAPConfigPortal(const String& wifiHostname);
 void connectToNetwork();
 void initializeMDNS();
+void handleSerialProvisioning();
 
 // Config.ino
 int degreesToRotationIndex(int degrees);
@@ -143,9 +155,14 @@ void processPendingBitmap(const String& bitmapBase64);
 // ============================================================================
 
 Preferences preferences;
+#ifdef ATOMIC_POE_BUILD
+EthernetClient client;
+PoeWebServer restServer(9999);
+#else
 WiFiManager wifiManager;
 WiFiClient  client;
 WebServer   restServer(9999);
+#endif
 
 // Companion server
 std::array<char, 40> companion_host = {""};
@@ -170,6 +187,10 @@ const unsigned long pingIntervalMs = 1000;
 
 // Display & LED
 int brightness = 100;
+bool ledEnabled = true;
+int ledBrightnessPercent = 100;
+String configuredDeviceName = "";
+String serialProvisionBuffer = "";
 
 const int LED_PIN_RED   = G8;
 const int LED_PIN_GREEN = G5;
@@ -185,11 +206,13 @@ uint8_t lastColorB = 0;
 
 int displayMode = DISPLAY_BITMAP;
 
+#ifndef ATOMIC_POE_BUILD
 WiFiManagerParameter* custom_companionIP = nullptr;
 WiFiManagerParameter* custom_companionPort = nullptr;
 WiFiManagerParameter* custom_displayMode = nullptr;
 WiFiManagerParameter* custom_rotation = nullptr;
 WiFiManagerParameter* custom_mdnsEnabled = nullptr;
+#endif
 
 int screenRotation = 0;  // 0=0°, 1=90°, 2=180°, 3=270° (TEXT mode only)
 bool mdnsEnabled = true;
@@ -324,12 +347,16 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\n[M5AtomS3] Booting...");
 
-  // Build deviceID from MAC
+  // Build deviceID from the ESP32 factory MAC.
+#ifndef ATOMIC_POE_BUILD
   WiFi.mode(WIFI_STA);
   delay(100);
-
   uint8_t mac[6];
   WiFi.macAddress(mac);
+#else
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+#endif
 
   char macBuf[13];
   sprintf(macBuf, "%02X%02X%02X%02X%02X%02X",
@@ -358,20 +385,25 @@ void setup() {
   applyDisplayBrightness();
   clearScreen(BLACK);
 
+  setupLED();
+  runBootColorTest();
+
   // Boot menu if button held
   if (M5.BtnA.isPressed())
     runBootMenu();
 
   drawCenterText("Booting...\n\n\nHold button\non boot\nfor MENU", WHITE, BLACK);
 
-  setupLED();
-
+#ifndef ATOMIC_POE_BUILD
   WiFi.setHostname(deviceID.c_str());
+#endif
   connectToNetwork();
 
+#ifndef ATOMIC_POE_BUILD
   ArduinoOTA.setHostname(deviceID.c_str());
   ArduinoOTA.setPassword("companion-satellite");
   ArduinoOTA.begin();
+#endif
 
   setupRestServer();
   initializeMDNS();
@@ -384,20 +416,34 @@ void setup() {
   clearScreen(BLACK);
   setExternalLedColor(0, 0, 0);
 
-  String waitMsg =
-    "Waiting for\nCompanion\n\n" +
-    String(companion_host.data()) + ":" + String(companion_port.data()) +
-    "\n\n" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " mode";
-
-  drawCenterText(waitMsg, WHITE, BLACK);
+  String networkName;
+  String setupAddress;
+#ifdef ATOMIC_POE_BUILD
+  networkName = "Ethernet";
+  setupAddress = Ethernet.localIP().toString() + ":9999";
+#else
+  if (WiFi.status() == WL_CONNECTED) {
+    networkName = WiFi.SSID();
+    setupAddress = WiFi.localIP().toString() + ":9999";
+  } else {
+    networkName = "WiFi not connected";
+    setupAddress = "0.0.0.0:9999";
+  }
+#endif
+  drawCompanionWaitingScreen(networkName, setupAddress);
 
   Serial.println("[System] Setup complete, entering main loop.");
 }
 
 void loop() {
   M5.update();
+#ifndef ATOMIC_POE_BUILD
   ArduinoOTA.handle();
+#else
+  Ethernet.maintain();
+#endif
   restServer.handleClient();
+  handleSerialProvisioning();
 
   unsigned long now = millis();
 
@@ -426,7 +472,7 @@ void loop() {
 
   // Attempt reconnection with progressive backoff
   unsigned long reconnectInterval = getBackoffInterval(firstDisconnectTime);
-  if (!tcpConnected && (now - lastConnectTry >= reconnectInterval)) {
+  if (companion_host[0] != '\0' && !tcpConnected && (now - lastConnectTry >= reconnectInterval)) {
     connectionState = CONN_RECONNECTING;
     lastConnectTry = now;
 

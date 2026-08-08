@@ -1,7 +1,7 @@
 M5-AtomS3-Companion-v4-Satellite
 
 A compact, single-button satellite surface built for Companion v4 using the M5 AtomS3.
-Includes external RGB rear LED, full-screen upscaled bitmap mode, a new ultra-fast text mode, WiFi config portal, mDNS autodiscovery, OTA updates, and auto MAC-based deviceID.
+Separate Wi-Fi + external LED and Atomic PoE/W5500 firmware variants include full-screen bitmap mode, ultra-fast text mode, wired or Wi-Fi configuration, browser updates, and an automatic MAC-based device ID.
 Perfect for enhancing productions with on-stage triggers, tally, timers, cues, and status text.
 
 Features
@@ -11,6 +11,8 @@ Features
     - Auto-wraps text similar to companion
     - Supports COLOR= and TEXTCOLOR=
 - External RGB LED output on G8/G5/G6 (G7 = Ground), mirrors key colour
+- Synchronized red, green, blue and white screen/LED self-test at boot, with
+  each colour shown for 300 ms
 - Interactive boot menu — Hold button during boot to configure settings
 - QR code display for easy WiFi setup and web portal access
 - Optional mDNS service discovery (companion-satellite._tcp) for automatic device discovery
@@ -19,6 +21,7 @@ Features
 - Supports the Companion Satellite API used by Companion v4: TEXT, BITMAP, COLOR, TEXTCOLOR, BRIGHTNESS, KEY-STATE, PING
 - Clean, stable, production-ready codebase
 - M5Burner-ready binaries available
+- Atomic PoE Base build with W5500 DHCP, wired setup/REST page and browser firmware updates
 
 Hardware Connections
 G8 – LED Red
@@ -27,32 +30,43 @@ G6 – LED Blue
 G7 – LED Ground
 Use a common-cathode RGB LED (G7 = Ground)
 
+The external LED and Atomic PoE Base use the same GPIOs. Install the normal firmware for Wi-Fi + LED, or the `-poe` firmware for Ethernet + PoE; the PoE variant disables external LED access.
+
 Recommended LED
 AU: https://www.jaycar.com.au/tricolour-rgb-5mm-led-600-1000mcd-round-diffused/
 USA: https://www.adafruit.com/product/302
 
 Installation & Usage
 Initial install with ESPHome Web (recommended)
-1. Download `M5-AtomS3-Companion-v4-Satellite-factory.bin` from the latest GitHub release. This is the complete first-install image.
+1. Download the matching `M5-AtomS3-Companion-v4-Satellite-wifi-factory.bin` or `M5-AtomS3-Companion-v4-Satellite-poe-factory.bin` from the latest GitHub release. This is the complete first-install image.
 2. Connect the AtomS3 with a USB **data** cable and open [ESPHome Web](https://web.esphome.io/).
 3. Select **Connect**, choose the serial device, then choose **Install** and select the downloaded `.bin`.
 4. Configure Wi-Fi and Companion after boot. Future updates use the built-in `http://<device-ip>:9999/update` page—no USB cable required.
 
-There are two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
+Each network variant has two release files: `*-factory.bin` is for the first USB flash only; `*.ino.bin` is the smaller application image for browser updates. The application image will not boot when flashed as a first install.
+
+The v1.3.10 release provides:
+
+- `*-wifi-factory.bin` / `*-wifi.ino.bin` — Wi-FiManager, mDNS, ArduinoOTA and external RGB LED.
+- `*-poe-factory.bin` / `*-poe.ino.bin` — Atomic PoE Base, W5500 DHCP and wired setup at `http://<dhcp-ip>:9999/`.
+
+The PoE build uses G5=SCK, G7=MISO, G8=MOSI and G6=CS. Its DHCP address and setup URL appear on the AtomS3 display.
 
 Arduino development environment
 1. Clone this repository.
 2. Open M5-AtomS3-Companion-v4-Satellite.ino in Arduino IDE.
 3. Arduino will automatically load all .ino tabs (Hardware, Display, Network, Config).
 4. Select M5AtomS3 via ESP32 board manager.
-5. Install libraries: M5Unified, WiFiManager, Preferences.
-6. Flash to the AtomS3.
-7. On first boot, device will create a WiFi access point (SSID = m5atom-s3_XXXXX).
-8. Device displays QR code for easy WiFi connection (press button to toggle details).
-9. Scan QR code or connect manually to the AP, then configure WiFi credentials, Companion IP/Port, display mode, and mDNS discovery at 192.168.4.1.
-10. Device will connect to WiFi and show "Ready" screen.
-11. In Companion v4: Device is automatically discovered via mDNS when enabled, or can be configured manually with the Companion IP and port. Boot into Web Config mode to change either setting.
-12. Press button to send KEY-PRESS to Companion. LED mirrors key color.
+5. Install libraries: M5Unified, WiFiManager and M5-Ethernet. Preferences is supplied by the ESP32 board package.
+6. Build normally for Wi-Fi + LED. Define `ATOMIC_POE_BUILD` for the Atomic PoE/W5500 variant.
+7. Flash to the AtomS3.
+8. On first boot, device will create a WiFi access point (SSID = m5atom-s3_XXXXX).
+9. Device displays QR code for easy WiFi connection (press button to toggle details).
+10. Scan QR code or connect manually to the AP, then configure WiFi credentials, Companion IP/Port, display mode, and mDNS discovery at 192.168.4.1.
+11. Device connects to Wi-Fi and, while waiting for Companion, shows the network
+    name in green and its `IP-address:9999` setup URL in yellow on the next line.
+12. In Companion v4: Device is automatically discovered via mDNS when enabled, or can be configured manually with the Companion IP and port. Boot into Web Config mode to change either setting.
+13. Press button to send KEY-PRESS to Companion. LED mirrors key color.
 
 Boot Menu
 - Enter menu: Hold button during boot
@@ -61,16 +75,46 @@ Boot Menu
 - Options:
   - Boot: Normal — Continue normal boot
   - Boot: Web Config — Open config portal on current WiFi (displays QR code for portal URL, press button to toggle details)
-  - Boot: Reset — Create WiFi AP for reconfiguration (displays WiFi QR code, press button to toggle details)
+  - Boot: WiFi AP — Create a Wi-Fi AP for reconfiguration (displays a Wi-Fi QR code; press the button to toggle details)
   - Display: BITMAP/TEXT — Toggle display mode (saves immediately)
   - Rotation: 0°/90°/180°/270° — Adjust text rotation (TEXT mode only, saves immediately)
 
+### Change or reset the Wi-Fi connection
+
+Hold the AtomS3 button during boot, short-click to **Boot: WiFi AP**, then hold for
+one second to select it. Join the displayed `m5atom-s3_XXXXX` network, open
+`http://192.168.4.1/` if needed, choose the replacement Wi-Fi network, and save.
+This replaces the stored Wi-Fi credentials. **Boot: Web Config** changes
+Companion and display settings while retaining the current Wi-Fi connection.
+The Atomic PoE build uses Ethernet and has no Wi-Fi credentials to reset.
+
+### Companion discovery and one-click setup
+
+When mDNS discovery is enabled, the Wi-Fi build advertises
+`_companion-satellite._tcp`. In Companion, open **Surfaces > Remote Surfaces**,
+find the AtomS3, select **+ Setup**, choose the address Companion should
+advertise, and confirm. Companion writes that address and Satellite TCP port
+`16622` to the device's REST API on port `9999`.
+
+The enable/disable switch shown for devices such as Stream Deck Network Dock is
+provided by their Companion surface-integration module and does not apply to
+Satellite API connections. **+ Setup** is the expected claiming flow for this
+firmware. mDNS requires a shared broadcast domain or an mDNS reflector between
+VLANs. Use Web Config or the port `9999` dashboard when discovery is unavailable;
+the Atomic PoE build currently uses this manual path.
+
 OTA Firmware Update
-- **Web update:** browse to `http://<device-ip>:9999/update`, choose `M5-AtomS3-Companion-v4-Satellite.ino.bin`, then wait for the automatic reboot. It is open by default; use the **Optional protection** form on that page to set or remove a password. Once set, sign in as `admin` with your chosen password. Do not remove power during the upload.
-- Use only `M5-AtomS3-Companion-v4-Satellite.ino.bin` from a GitHub release; do not upload bootloader or partition files.
+- **Web update:** browse to `http://<device-ip>:9999/update`, choose the matching `*-wifi.ino.bin` or `*-poe.ino.bin`, then wait for the automatic reboot. It is open by default; use the **Optional protection** form on that page to set or remove a password. Once set, sign in as `admin` with your chosen password. Do not remove power during the upload.
+- Use only the matching application `.ino.bin` from a GitHub release; do not upload bootloader or partition files.
 - OTA enabled by default.
 - Hostname = m5atom-s3_XXXXX (matches deviceID)
 - Password protection is optional for the browser updater; ArduinoOTA retains its existing password.
+
+The dashboard at `http://<device-ip>:9999/` shows the device name and ID,
+network and Companion connection state, IP address, display mode, latest
+incoming text and RGB colour, and message health. It refreshes every two
+seconds. Use `http://<device-ip>:9999/update` with the release application BIN
+for over-the-air updates; factory BINs are only for ESPHome Web USB installs.
 - Update from Arduino IDE using Network Ports.
 
 Troubleshooting
@@ -87,6 +131,11 @@ Not connecting to Companion:
 - Check firewall rules.
 
 Version History
+v1.3.10
+- Separate Wi-Fi + LED and Atomic PoE/W5500 firmware variants
+- Wired DHCP setup, REST settings and streamed browser firmware updates
+- Persistent brightness, display mode, rotation, external RGB LED enable, and 0-200% LED scale settings
+- Port 9999 hardware tests and optional Web Serial batch provisioning
 v1.4
 - mDNS service discovery for automatic device detection
 - DeviceID format changed to m5atom-s3_XXXXX (last 5 MAC chars)

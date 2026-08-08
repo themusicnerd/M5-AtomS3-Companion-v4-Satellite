@@ -28,6 +28,10 @@ void writeLedPwm(uint8_t pin, uint8_t channel, uint8_t value) {
 }
 
 void setupLED() {
+#ifdef ATOMIC_POE_BUILD
+  // G5/G6/G7/G8 are the Atomic PoE W5500 SPI bus.
+  Serial.println("[LED] Disabled in Atomic PoE build");
+#else
   pinMode(LED_PIN_GND, OUTPUT);
   digitalWrite(LED_PIN_GND, LOW);
 
@@ -36,7 +40,25 @@ void setupLED() {
   attachLedPwm(LED_PIN_BLUE, 2);
 
   setExternalLedColor(0, 0, 0);
-  setExternalLedColor(255, 255, 255);  // Power-on test
+#endif
+}
+
+void runBootColorTest() {
+  const uint8_t colors[][3] = {
+    {255, 0, 0},
+    {0, 255, 0},
+    {0, 0, 255},
+    {255, 255, 255}
+  };
+
+  for (const auto& color : colors) {
+    M5.Display.fillScreen(M5.Display.color565(color[0], color[1], color[2]));
+    setExternalLedColor(color[0], color[1], color[2]);
+    delay(300);
+  }
+
+  M5.Display.fillScreen(BLACK);
+  setExternalLedColor(0, 0, 0);
 }
 
 // ============================================================================
@@ -48,16 +70,16 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
   lastColorG = g;
   lastColorB = b;
 
-  // Scale by brightness (min 15% to keep LED visible)
-  uint8_t scaledR = r * max(brightness, 15) / 100;
-  uint8_t scaledG = g * max(brightness, 15) / 100;
-  uint8_t scaledB = b * max(brightness, 15) / 100;
-
   // For common anode LED, invert: scaledX = 255 - scaledX
 
-  writeLedPwm(LED_PIN_RED, 0, scaledR);
-  writeLedPwm(LED_PIN_GREEN, 1, scaledG);
-  writeLedPwm(LED_PIN_BLUE, 2, scaledB);
+#ifndef ATOMIC_POE_BUILD
+  const uint8_t outputR = ledEnabled ? min(255, int(r) * ledBrightnessPercent / 100) : 0;
+  const uint8_t outputG = ledEnabled ? min(255, int(g) * ledBrightnessPercent / 100) : 0;
+  const uint8_t outputB = ledEnabled ? min(255, int(b) * ledBrightnessPercent / 100) : 0;
+  writeLedPwm(LED_PIN_RED, 0, outputR);
+  writeLedPwm(LED_PIN_GREEN, 1, outputG);
+  writeLedPwm(LED_PIN_BLUE, 2, outputB);
+#endif
 }
 
 // ============================================================================
@@ -65,6 +87,9 @@ void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
 // ============================================================================
 
 void updateReconnectingLED() {
+#ifdef ATOMIC_POE_BUILD
+  return;
+#else
   unsigned long now = millis();
 
   if (now - lastBlinkTime >= blinkIntervalMs) {
@@ -77,4 +102,5 @@ void updateReconnectingLED() {
       setExternalLedColor(0, 0, 0);    // OFF
     }
   }
+#endif
 }

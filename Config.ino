@@ -23,6 +23,7 @@
 
 extern String firmwareUpdatePassword;
 
+#ifndef ATOMIC_POE_BUILD
 String getParam(const String& name) {
   if (wifiManager.server && wifiManager.server->hasArg(name))
     return wifiManager.server->arg(name);
@@ -84,6 +85,7 @@ void saveParamCallback() {
   if (str_mdnsEnabled.length() > 0)    preferences.putBool("mdnsEnabled", str_mdnsEnabled == "enabled");
   preferences.end();
 }
+#endif
 
 // ============================================================================
 // Preferences Management
@@ -108,6 +110,10 @@ void loadPreferences() {
 
   String modeStr = preferences.getString("displayMode", "bitmap");
   String rotStr  = preferences.getString("rotation",   "0");
+  brightness = preferences.getInt("brightness", 100);
+  ledEnabled = preferences.getBool("ledEnabled", true);
+  ledBrightnessPercent = constrain(preferences.getInt("ledBrightness", 100), 0, 200);
+  configuredDeviceName = preferences.getString("deviceName", "");
   firmwareUpdatePassword = preferences.getString("updatepassword", "");
   mdnsEnabled = preferences.getBool("mdnsEnabled", true);
 
@@ -134,12 +140,17 @@ void loadPreferences() {
   Serial.println(screenRotation);
   Serial.print("[Prefs] mDNS discovery: ");
   Serial.println(mdnsEnabled ? "enabled" : "disabled");
+  Serial.print("[Prefs] External LED: ");
+  Serial.println(ledEnabled ? "enabled" : "disabled");
 }
 
 void saveDisplaySettings() {
   preferences.begin("companion", false);
   preferences.putString("displayMode", displayMode == DISPLAY_TEXT ? "text" : "bitmap");
   preferences.putString("rotation", String(screenRotation * 90));
+  preferences.putInt("brightness", brightness);
+  preferences.putBool("ledEnabled", ledEnabled);
+  preferences.putInt("ledBrightness", ledBrightnessPercent);
   preferences.end();
 }
 
